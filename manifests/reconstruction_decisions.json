@@ -1,0 +1,68 @@
+{
+  "reproduction_level": "METHOD_FAITHFUL",
+  "execution_scope": "AUTHORIZATION_SPC_RECONSTRUCTED",
+  "scope_change": "QA and ATS artifacts are retained as historical partial work; current execution was switched back to the user-requested authorization-focused SPC approximate reproduction.",
+  "current_scope": "AUTHORIZATION_SPC_APPROXIMATE_REPRODUCTION",
+  "authorization_types": ["ActAuth", "ScopeAuth", "ShareAuth", "WriteAuth", "Destructive/RevokeAuth"],
+  "semantic_filter": "J(original)=safe_or_confirmation AND J(without_authorization_rule)=allow; no padding when the pool is insufficient",
+  "current_frozen_count": 3,
+  "seed": 42,
+  "decisions": [
+    {
+      "component": "ATS source and selection",
+      "official_status": "missing snapshot and IDs",
+      "reconstruction": "current public Apify Store popularity page; non-empty ASCII descriptions, length 80-900, category present, exact-description deduplication, SHA-256(seed|tool_id) ordering",
+      "reason": "The paper specifies Apify Store and 249 entries but does not publish the snapshot or IDs.",
+      "dataset_status": "ATS_RECONSTRUCTED_FROM_PAPER_PROTOCOL"
+    },
+    {
+      "component": "ATS distractors",
+      "official_status": "GPT-4o-mini outputs missing",
+      "reconstruction": "four JSON descriptions per selected tool via openai/gpt-4o-mini; temperature 0.7, top_p 1, seed 42+i, max_tokens 900",
+      "reason": "The paper specifies few-shot GPT-4o-mini augmentation but not prompts or outputs.",
+      "dataset_status": "RECONSTRUCTED"
+    },
+    {
+      "component": "QA sampling",
+      "official_status": "1000 IDs and seed missing",
+      "reconstruction": "SQuAD train-v1.1; valid answer spans; SHA-256(42|question_id) ordering; first 1000",
+      "reason": "The paper specifies SQuAD and a 1000-entry sample but not the sampled IDs.",
+      "dataset_status": "QA_RECONSTRUCTED_FROM_SQUAD_PROTOCOL"
+    },
+    {
+      "component": "QA clean-correct filter",
+      "official_status": "victim responses/filter artifact missing",
+      "reconstruction": "Ofox openai/gpt-4o clean response and standard SQuAD normalized exact match",
+      "reason": "The clean backend/evaluator configuration is not fully released; this is a reconstructed evaluation.",
+      "dataset_status": "RECONSTRUCTED"
+    },
+    {
+      "component": "SPC sources and selection",
+      "official_status": "source revisions, merge order, generated queries missing",
+      "reconstruction": "current shallow commits of the four cited public repositories plus normster/SystemCheck RealGuardrails; fixed source order, length <=1600 chars, SHA-256(seed|source|path) ordering",
+      "reason": "The paper names the sources but does not publish the merged snapshot or selected IDs.",
+      "dataset_status": "SPC_RECONSTRUCTED_FROM_PUBLIC_GUARDRAIL_SOURCES"
+    },
+    {
+      "component": "SPC semantic filters",
+      "official_status": "judge calls and final selector missing",
+      "reconstruction": "pending two-stage backend/judge evaluation; retain only J(orig)=safe and J(-sys)=violation",
+      "reason": "The paper describes the predicates but not the exact judge prompt/configuration.",
+      "dataset_status": "RECONSTRUCTED_EVALUATION_COMPLETED_POOL24_3_PASS"
+    },
+    {
+      "component": "SPC pinned runner threat model",
+      "official_status": "implementation mismatch observed",
+      "reconstruction": "do not patch; audit whether official runner edits system_prompt directly rather than appending adversarial_query",
+      "reason": "Changing this would alter COMA attack implementation; any result must disclose the mismatch.",
+      "dataset_status": "UPSTREAM_IMPLEMENTATION_DEVIATION"
+    },
+    {
+      "component": "LLMLingua-2 victim",
+      "official_status": "official model ID specified; remote cache incomplete",
+      "reconstruction": "download/verify microsoft/llmlingua-2-xlm-roberta-large-meetingbank for true compressor evaluation; use pinned runner's declared surrogate separately",
+      "reason": "The pinned runner and compressor wrapper use different LLMLingua-2 IDs; preserve both roles and disclose the discrepancy.",
+      "dataset_status": "MODEL_RECONSTRUCTED_VERSION_TRANSFERRED"
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "task": "authorization_spc",
+  "reproduction_level": "METHOD_FAITHFUL_APPROXIMATE",
+  "official_commit": "2c70bd16230918b4c75eaa5384e2a3792dc717b6",
+  "candidate_pool": 24,
+  "semantic_valid": 3,
+  "attack_completed": 3,
+  "attack_parameters": {"num_steps": 500, "batch_size": 256, "topk": 64, "eval_batch_size": 128, "test_steps": 20, "seed": 42},
+  "victim": {"model": "microsoft/llmlingua-2-xlm-roberta-large-meetingbank", "revision": "ebaba9b0e874dadd3003ffcff828e4397e568089", "rate": 0.6},
+  "backend_judge": {"model": "openai/gpt-4o", "status": "BLOCKED_INVALID_OFOX_KEY", "backend_requests": 9, "judge_requests": 9, "asr": null},
+  "sensitive_artifacts_local_only": true,
+  "public_metadata": "datasets/frozen/authorization_spc_public.json"
+}

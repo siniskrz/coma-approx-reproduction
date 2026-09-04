@@ -1,0 +1,17 @@
+{
+  "reproduction_level": "METHOD_FAITHFUL",
+  "data_status": "RECONSTRUCTED",
+  "execution_scope": "AUTHORIZATION_SPC_RECONSTRUCTED",
+  "seed": 42,
+  "official_commit": "2c70bd16230918b4c75eaa5384e2a3792dc717b6",
+  "tasks": {
+    "spc": {
+      "count": 3,
+      "sha256": "4807bcd0981417e6b47f9344a342f741ec28f83f1417a18ebfe563a58ed3e1b1",
+      "public_metadata_sha256": "7764245027d5d64ed7f7115fadcef78444c829ae14e72f6f2a3fc97f9c4a16ff"
+    }
+  },
+  "semantic_filter_pool": 24,
+  "sensitive_artifacts_local_only": true,
+  "backend_judge_status": "BLOCKED_INVALID_OFOX_KEY"
+}

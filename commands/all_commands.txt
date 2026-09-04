@@ -1,0 +1,20 @@
+# COMA Authorization-SPC Approximate Reproduction; seed=42
+# Credentials are supplied only through OPENAI_API_KEY at execution time.
+python3 reconstruction_tools/reconstruct.py prepare
+OPENAI_API_KEY=<runtime-secret> python3 reconstruction_tools/ofox_batch.py --input datasets/intermediate/spc_auth_generation_requests_pool_v4.jsonl --output datasets/intermediate/spc_auth_generation_responses_pool_v4.jsonl --credential-env OPENAI_API_KEY --sleep 8
+python3 reconstruction_tools/spc_filter.py build-backend --data datasets/intermediate/spc_auth_selected_prompts_pool_v4.json --generation datasets/intermediate/spc_auth_generation_responses_pool_v4.jsonl --output datasets/intermediate/spc_auth_backend_requests_pool_v4.jsonl
+OPENAI_API_KEY=<runtime-secret> python3 reconstruction_tools/ofox_batch.py --input datasets/intermediate/spc_auth_backend_requests_pool_v4.jsonl --output datasets/intermediate/spc_auth_backend_responses_pool_v4.jsonl --credential-env OPENAI_API_KEY --sleep 8
+python3 reconstruction_tools/spc_filter.py build-judge --backend datasets/intermediate/spc_auth_backend_responses_pool_v4.jsonl --output datasets/intermediate/spc_auth_judge_requests_pool_v4.jsonl
+OPENAI_API_KEY=<runtime-secret> python3 reconstruction_tools/ofox_batch.py --input datasets/intermediate/spc_auth_judge_requests_pool_v4.jsonl --output datasets/intermediate/spc_auth_judge_responses_pool_v4.jsonl --credential-env OPENAI_API_KEY --sleep 8
+python3 reconstruction_tools/spc_filter.py finalize --data datasets/intermediate/spc_auth_selected_prompts_pool_v4.json --generation datasets/intermediate/spc_auth_generation_responses_pool_v4.jsonl --backend datasets/intermediate/spc_auth_backend_responses_pool_v4.jsonl --judge datasets/intermediate/spc_auth_judge_responses_pool_v4.jsonl --output datasets/frozen/spc_filtered_pool_v4.json --limit 5
+python3 reconstruction_tools/reconstruct.py spc-finalize
+
+# Remote official runner (authorization SPC; selected free GPU, full budget):
+CUDA_VISIBLE_DEVICES=<free-physical-GPU> python run_guardrail_attack.py --data <frozen-authorization_spc.json> --output <out> --compressor llmlingua2 --surrogate-model <cached-llmlingua2-base> --max-entries <frozen-count> --num-steps 500 --batch-size 256 --topk 64 --eval-batch-size 128 --test-steps 20 --seed 42
+# Real victim pass (remote; explicit XLM snapshot and TIKTOKEN_CACHE_DIR required):
+PYTHONPATH=<vendor> TIKTOKEN_CACHE_DIR=<own-tiktoken-cache> python3 reconstruction_tools/compress_inputs.py --task spc --input <official-results-jsonl> --output <compressed-jsonl> --model-path <cached-xlm-snapshot> --rate 0.6
+python3 reconstruction_tools/build_e2e_requests.py --task spc --data results/spc/guardrail_extractive_results.jsonl --compressed results/spc/llmlingua2_compressed.jsonl --output results/spc/backend_requests.jsonl
+OPENAI_API_KEY=<runtime-secret> python3 reconstruction_tools/ofox_batch.py --input results/spc/backend_requests.jsonl --output results/spc/backend_responses.jsonl --credential-env OPENAI_API_KEY --sleep 8 --resume
+python3 reconstruction_tools/evaluate_authorization_spc.py build-judge --data results/spc/guardrail_extractive_results.jsonl --compressed results/spc/llmlingua2_compressed.jsonl --output results/spc/auth_judge_requests.jsonl
+OPENAI_API_KEY=<runtime-secret> python3 reconstruction_tools/ofox_batch.py --input results/spc/auth_judge_requests.jsonl --output results/spc/judge_responses.jsonl --credential-env OPENAI_API_KEY --sleep 8 --resume
+python3 reconstruction_tools/evaluate_authorization_spc.py summarize --data results/spc/guardrail_extractive_results.jsonl --compressed results/spc/llmlingua2_compressed.jsonl --backend-responses results/spc/backend_responses.jsonl --judge-responses results/spc/judge_responses.jsonl --output reports/authorization_spc_result.json

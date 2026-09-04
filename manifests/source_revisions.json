@@ -1,0 +1,46 @@
+{
+  "sources": [
+    {
+      "source": "SystemCheck",
+      "url": "https://github.com/normster/RealGuardrails.git",
+      "revision": "ed829f6ac7cd4e09f7161fe7dffbebdd220eb024",
+      "retrieval_date": "2026-09-04"
+    },
+    {
+      "source": "TheBigPromptLibrary",
+      "url": "https://github.com/0xeb/TheBigPromptLibrary.git",
+      "revision": "3579cd97a20defa92d7a7da2e695dc89e0845911",
+      "retrieval_date": "2026-09-04"
+    },
+    {
+      "source": "leaked-system-prompts",
+      "url": "https://github.com/jujumilk3/leaked-system-prompts.git",
+      "revision": "3afab05da7bbba93d04458e4b44e4239198f69cd",
+      "retrieval_date": "2026-09-04"
+    },
+    {
+      "source": "system-prompts-and-models-of-ai-tools",
+      "url": "https://github.com/x1xhlol/system-prompts-and-models-of-ai-tools.git",
+      "revision": "1e4203a7d88873c1b37ab2d1c07074fea498c274",
+      "retrieval_date": "2026-09-04"
+    },
+    {
+      "source": "system_prompts_leaks",
+      "url": "https://github.com/asgeirtj/system_prompts_leaks.git",
+      "revision": "171d1db270008b6cd8132f1a1b924ff3506b9f8a",
+      "retrieval_date": "2026-09-04"
+    }
+  ],
+  "raw_artifacts": [
+    {
+      "path": "datasets/raw/apify_store_popularity_0_1000.json",
+      "sha256": "f03b903637d714f3dc3083c1bee04d2729eff9774300c80a4953250f81e98eaa",
+      "bytes": 594090
+    },
+    {
+      "path": "datasets/raw/squad_train_v1.1.json",
+      "sha256": "3527663986b8295af4f7fcdff1ba1ff3f72d07d61a20f487cb238a6ef92fd955",
+      "bytes": 30288272
+    }
+  ]
+}

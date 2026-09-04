@@ -1,0 +1,20 @@
+datasets/raw/*.json
+datasets/raw/*.tiktoken
+datasets/intermediate/
+sources/
+official_checkout/
+__pycache__/
+.scratch_*
+*.pyc
+# Raw prompts and model responses may contain third-party prompt material.
+datasets/frozen/authorization_spc.json
+datasets/frozen/spc_*.json
+datasets/frozen/ats_*.json
+results/spc/guardrail_extractive_results.jsonl
+results/spc/llmlingua2_compressed.jsonl
+results/spc/backend_requests.jsonl
+results/spc/backend_responses.jsonl
+results/spc/auth_judge_requests.jsonl
+results/spc/judge_responses.jsonl
+logs/
+manifests/prepare_summary*.json

@@ -1,0 +1,1 @@
+7764245027d5d64ed7f7115fadcef78444c829ae14e72f6f2a3fc97f9c4a16ff  authorization_spc_public.json
