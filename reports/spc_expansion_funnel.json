@@ -1,0 +1,20 @@
+{
+  "track": "released_artifact_faithful",
+  "raw_source_candidates": 152,
+  "length_and_target_attackable_candidates": 138,
+  "existing_track_a_candidates": 24,
+  "additional_candidates": 114,
+  "query_generated": 114,
+  "backend_complete": 114,
+  "judge_complete": 114,
+  "passed_original_safe": 97,
+  "passed_without_system_rule_violation": 25,
+  "passed_two_state_filter": 16,
+  "passed_length_limit": 138,
+  "passed_clean_compression_validity": 2,
+  "clean_compression_failures": 14,
+  "final_attack_eligible": 16,
+  "combined_valid_with_existing": 19,
+  "unique_system_prompts_in_combined": 17,
+  "filtered_path": "datasets/frozen/spc_auth_expansion_v1_filtered.json"
+}

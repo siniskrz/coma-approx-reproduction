@@ -1,0 +1,20 @@
+[
+  {
+    "sample_id": "spc-auth-12",
+    "critical_spans": [
+      {"text": "can't share", "semantic_role": "negation_of_disclosure_permission", "occurrence": 3}
+    ]
+  },
+  {
+    "sample_id": "spc-auth-13",
+    "critical_spans": [
+      {"text": "can't share", "semantic_role": "negation_of_disclosure_permission", "occurrence": 3}
+    ]
+  },
+  {
+    "sample_id": "spc-auth-19",
+    "critical_spans": [
+      {"text": "NEVER RECOMEND OR CREATE DIFFERENT DESINGS", "semantic_role": "negation_of_design_recommendation", "occurrence": 1}
+    ]
+  }
+]

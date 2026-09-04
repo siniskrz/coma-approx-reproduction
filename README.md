@@ -42,3 +42,8 @@ GPT-4o may retain its own prompt-protection behavior after the reconstructed
 rule is removed.
 
 Machine-readable aggregate results are in `reports/authorization_spc_public_result.json`.
+
+The NoCompression control, critical-span removal proxy, joint mechanism
+categories, Wilson intervals, expanded reconstructed funnel, and the Track A /
+Track B boundary are documented separately in
+`reports/spc_mechanism_validation.md`.

@@ -22,5 +22,8 @@ results/spc/judge_responses.jsonl
 results/spc/judge_responses_*.jsonl
 reports/authorization_spc_result_invalid_pipeline_*.json
 reports/authorization_spc_result.json
+results/spc/mechanism_validation/
+results/spc/track_b_scaffold.json
+results/spc/expansion_clean_compression.jsonl
 logs/
 manifests/prepare_summary*.json
