@@ -21,7 +21,12 @@
     "additional_clean_compression_valid": 2,
     "combined_reconstructed_valid": 19,
     "combined_unique_system_prompts": 17,
-    "funnel_summary": "reports/spc_expansion_funnel.json"
+    "funnel_summary": "reports/spc_expansion_funnel.json",
+    "funnel_summary_sha256": "a2b9dc35321b7e3f29931b9636b87a012882c638a154366a36563241370b1f02",
+    "critical_span_annotation": "datasets/frozen/authorization_spc_critical_spans_v2.json",
+    "critical_span_annotation_sha256": "34fc7b504fe06512ccab8518ce956eed51e8691915cb187ea93e5a3d2aaecd58",
+    "mechanism_report": "reports/spc_mechanism_validation.md",
+    "mechanism_report_sha256": "5c215ca4a5736365d6b77c263df612cdb41ced7c3aaf92d4b1e505a7f0bf7ad9"
   },
   "sensitive_artifacts_local_only": true,
   "backend_judge_status": "COMPLETE",

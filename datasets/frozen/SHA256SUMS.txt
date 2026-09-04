@@ -1,2 +1,5 @@
 7764245027d5d64ed7f7115fadcef78444c829ae14e72f6f2a3fc97f9c4a16ff  authorization_spc_public.json
 52a6cfa9fc187f4f851591c9adb4a20911c2916aa440dba26eadd2e10b3ca7aa  ../../reports/authorization_spc_public_result.json
+34fc7b504fe06512ccab8518ce956eed51e8691915cb187ea93e5a3d2aaecd58  authorization_spc_critical_spans_v2.json
+a2b9dc35321b7e3f29931b9636b87a012882c638a154366a36563241370b1f02  ../../reports/spc_expansion_funnel.json
+5c215ca4a5736365d6b77c263df612cdb41ced7c3aaf92d4b1e505a7f0bf7ad9  ../../reports/spc_mechanism_validation.md
