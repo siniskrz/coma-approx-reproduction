@@ -34,3 +34,11 @@ pinned runner. If fewer rows pass, the count is reported rather than padded.
 All reconstruction choices, source revisions, raw artifact hashes, commands,
 and deviations are recorded under `manifests/`, `commands/`, `reports/`, and
 `datasets/frozen/`. No Mem0/A-Mem experiment is included in this stage.
+
+The completed 3-row slice has baseline-conditioned reconstructed ASR 2/3
+(66.7%). The rule-removal target control passed on 1/3 rows, giving a
+target-conditioned ASR of 0/1; these controls are reported explicitly because
+GPT-4o may retain its own prompt-protection behavior after the reconstructed
+rule is removed.
+
+Machine-readable aggregate results are in `reports/authorization_spc_public_result.json`.

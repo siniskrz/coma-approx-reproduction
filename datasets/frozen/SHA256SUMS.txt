@@ -1,1 +1,2 @@
 7764245027d5d64ed7f7115fadcef78444c829ae14e72f6f2a3fc97f9c4a16ff  authorization_spc_public.json
+52a6cfa9fc187f4f851591c9adb4a20911c2916aa440dba26eadd2e10b3ca7aa  ../../reports/authorization_spc_public_result.json

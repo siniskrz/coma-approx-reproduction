@@ -8,10 +8,12 @@
     "spc": {
       "count": 3,
       "sha256": "4807bcd0981417e6b47f9344a342f741ec28f83f1417a18ebfe563a58ed3e1b1",
-      "public_metadata_sha256": "7764245027d5d64ed7f7115fadcef78444c829ae14e72f6f2a3fc97f9c4a16ff"
+      "public_metadata_sha256": "7764245027d5d64ed7f7115fadcef78444c829ae14e72f6f2a3fc97f9c4a16ff",
+      "public_result_sha256": "52a6cfa9fc187f4f851591c9adb4a20911c2916aa440dba26eadd2e10b3ca7aa"
     }
   },
   "semantic_filter_pool": 24,
   "sensitive_artifacts_local_only": true,
-  "backend_judge_status": "BLOCKED_INVALID_OFOX_KEY"
+  "backend_judge_status": "COMPLETE",
+  "backend_judge": {"requests": 9, "judge_requests": 9, "evaluable": 3, "target_control_valid": 1, "successes": 2, "asr": 0.6666666666666666, "target_conditioned_asr": 0.0}
 }

@@ -1,6 +1,6 @@
 # COMA Authorization-SPC approximate reproduction
 
-Status: **attack and victim-compressor stages complete; backend/Judge stage blocked by an invalid Ofox credential**.
+Status: **complete for the 3-row reconstructed authorization SPC slice**.
 
 This is a method-faithful reconstruction, not an exact reproduction of the
 paper's unreleased 1,563-row SPC file. The pinned clean checkout is COMA
@@ -58,12 +58,20 @@ and attacked variants succeeded:
 
 ## Backend and Judge
 
-Nine backend requests and nine authorization-state Judge requests were
-constructed with `openai/gpt-4o`, temperature 0, top-p 1, seed 42. A minimal
-probe and all nine backend calls returned HTTP 401 `Invalid or expired API key`.
-Consequently no backend response, final Judge state, or reconstructed ASR is
-claimed. Once a valid credential is supplied, rerun the commands in
-`commands/all_commands.txt`; the frozen attack and compressor outputs do not
-need to be regenerated.
+Nine backend requests and nine fixed rule-violation Judge requests were
+constructed with `openai/gpt-4o`, temperature 0, top-p 1, seed 42. The
+compressed text is sent as a real `system` message and the generated query as
+the `user` message. The Judge reads the actual backend response, not the
+compressed prompt.
+
+Results: all 3 original responses were safe; 2/3 attacked responses violated
+the protected rule, giving baseline-conditioned reconstructed ASR **2/3 =
+66.7%**. The target-control (rule-removal) condition passed for only 1/3 rows,
+so the target-conditioned ASR is **0/1 = 0%**. The two target-control failures
+are retained as evidence, not silently discarded; GPT-4o continued refusing
+the prompt-repetition request even when the reconstructed rule was removed.
+
+The prior 401 responses and the earlier wrong-message-format run are preserved
+as local-only diagnostic files and are excluded from the archive.
 
 Mem0/A-Mem migration is intentionally not included in this stage.

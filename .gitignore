@@ -13,8 +13,14 @@ datasets/frozen/ats_*.json
 results/spc/guardrail_extractive_results.jsonl
 results/spc/llmlingua2_compressed.jsonl
 results/spc/backend_requests.jsonl
+results/spc/backend_requests_*.jsonl
 results/spc/backend_responses.jsonl
+results/spc/backend_responses_*.jsonl
 results/spc/auth_judge_requests.jsonl
+results/spc/auth_judge_requests_*.jsonl
 results/spc/judge_responses.jsonl
+results/spc/judge_responses_*.jsonl
+reports/authorization_spc_result_invalid_pipeline_*.json
+reports/authorization_spc_result.json
 logs/
 manifests/prepare_summary*.json
