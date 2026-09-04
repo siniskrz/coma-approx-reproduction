@@ -1,0 +1,11 @@
+title,year,venue_or_source,link,paper_type,insight_score,completeness_score,numeric_evidence_score,overall_label,relevance_note,quality_note
+When Compression Becomes an Attack Surface (COMA),2026,arXiv v4,https://arxiv.org/abs/2510.22963,pure method,5,4,5,A,Central mechanism and controls,Primary paper with full HTML sections and tables
+Comattack,2026,Official GitHub,https://github.com/zsLiu2003/Comattack,system/tool,5,4,4,A,Author artifact and scripts,Primary implementation source
+LLMLingua / LLMLingua-2,2023-2024,Microsoft official repository,https://github.com/microsoft/LLMLingua,system/tool,4,5,5,A,Victim compressor behavior,Official implementation and ACL links
+SystemCheck,2024,Hugging Face dataset/project,https://huggingface.co/datasets/normster/SystemCheck,method + benchmark,4,4,4,A,Corpus and aligned/conflicting query construction,Public dataset card with collection details
+SystemPromptIndex / AISPA,2026,Official GitHub project,https://github.com/SystemPromptIndex/SystemPromptIndex,pure benchmark,4,4,N/A benchmark,B,Exact span audit schema,Public audited corpus; not COMA-specific
+AgentDojo,2024,NeurIPS Datasets and Benchmarks,https://github.com/ethz-spylab/agentdojo,pure benchmark,5,5,5,A,Paired agent security evaluation,Primary code and paper
+Agent Security Bench (ASB),2025,ICLR,https://github.com/agiresearch/ASB,pure benchmark,4,5,5,A,Multi-scenario agent security protocol,Primary proceedings and code
+Prompt Leakage effect and defense strategies,2024,EMNLP artifact,https://github.com/salesforce/prompt-leakage,method + benchmark,3,4,4,B,Provenance and real-output loop,Different leakage threat
+InjecGuard / NotInject,2024,arXiv and official GitHub,https://github.com/InjecGuard/InjecGuard,method + benchmark,4,4,4,B,Trigger-word and over-defense controls,Primary code and dataset
+SecurityLingua,2025,COLM OpenReview,https://openreview.net/forum?id=tybbSo6wba,pure method,3,4,4,B,Compression-security counterpoint,Primary paper page
