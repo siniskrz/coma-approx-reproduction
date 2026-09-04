@@ -24,7 +24,7 @@ def main():
     for x in data:
         rid=x["reconstruction_id"]; q=isinstance(g.get(rid),dict) and bool(g[rid].get("adversarial_query")); complete_q+=q
         o=parsed(content(j.get(f"{rid}-orig-judge",{}))); n=parsed(content(j.get(f"{rid}-nosys-judge",{})))
-        complete_b += int(f"{rid}-orig-backend" in b and f"{rid}-nosys-backend" in b)
+        complete_b += int(all(f"{rid}-{suffix}-backend" in b and bool(content(b[f"{rid}-{suffix}-backend"])) for suffix in ("orig", "nosys")))
         complete_j += int(isinstance(o,dict) and isinstance(n,dict))
         orig_safe += int(isinstance(o,dict) and o.get("violation") is False)
         without_violation += int(isinstance(n,dict) and n.get("violation") is True)
