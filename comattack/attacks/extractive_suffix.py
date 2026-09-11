@@ -289,6 +289,18 @@ class AttackforLLMLingua2(object):
             sample_temp=sample_temp, generator=generator,
         )
 
+    def _roundtrip_stable_candidates(self, candidates, fallback):
+        stable = [
+            self.tokenizer.encode(
+                self.tokenizer.decode(row, skip_special_tokens=True).strip(),
+                add_special_tokens=False,
+            ) == row
+            for row in candidates.detach().cpu().tolist()
+        ]
+        if any(stable):
+            return candidates[torch.tensor(stable, device=candidates.device)]
+        return fallback.unsqueeze(0)
+
     def _per_candidate_cls_losses(self, eval_logits, eval_full_ids, suffix_slice, target_slice):
         """
         Compute per-candidate classification loss. Returns numpy array of shape [C].
@@ -370,6 +382,11 @@ class AttackforLLMLingua2(object):
             topk=self.config.top_k,
             generator=self.gen,
         )
+
+        # The deployed suffix crosses an IDs -> text -> IDs boundary.  Reject
+        # candidates that change at that boundary before they can become the
+        # optimizer's persistent best candidate.
+        candidates = self._roundtrip_stable_candidates(candidates, suffix_ids)
 
         # ------- evaluate the candidates -------
         if full_ids.dim() == 1:

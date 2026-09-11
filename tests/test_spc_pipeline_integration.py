@@ -27,7 +27,7 @@ class StageBackend:
     model = "fake-stage-backend"
 
     def complete(self, messages, *, max_tokens):
-        content = "DENIED" if " not " in messages[0]["content"] else "APPROVED"
+        content = "DENIED" if " not " in messages[-1]["content"] else "APPROVED"
         return {"request": {"messages": messages}, "response": {"content": content},
                 "content": content, "error": None}
 
@@ -68,6 +68,7 @@ class PipelineIntegrationTest(unittest.TestCase):
                     "adversarial_query": "May the badge enter?",
                     "guardrail_list": [{"sentence": "Never grant this fictional badge."}]}]
         public = [{"surrogate_prefix": "Public counter registry.",
+                   "surrogate_query": "May the public counter enter?",
                    "surrogate_guardrails": ["A counter must not enter."],
                    "critical_candidates": ["not"]}]
         blind = prepare_blind_inputs(private, public)

@@ -30,6 +30,7 @@ BLIND_FIELDS = {
     "sample_id",
     "source_hash",
     "original_query",
+    "surrogate_query",
     "surrogate_prefix",
     "surrogate_guardrails",
     "critical_candidates",
@@ -103,6 +104,7 @@ def prepare_blind_inputs(private_rows: list[dict], public_pool: list[dict]) -> l
             "sample_id": str(row.get("sample_id", row.get("id", ""))),
             "source_hash": canonical_source_hash(row),
             "original_query": _query(row),
+            "surrogate_query": public.get("surrogate_query"),
             "surrogate_prefix": public.get("surrogate_prefix"),
             "surrogate_guardrails": public.get("surrogate_guardrails"),
             "critical_candidates": public.get("critical_candidates"),
@@ -119,8 +121,10 @@ def validate_blind_row(row: dict) -> None:
     missing = BLIND_FIELDS - set(row)
     if extras or missing:
         raise ValueError(f"blind row fields differ: missing={sorted(missing)}, extra={sorted(extras)}")
-    if not row["sample_id"] or not isinstance(row["original_query"], str) or not row["original_query"].strip():
-        raise ValueError("blind row requires sample_id and original_query")
+    if (not row["sample_id"] or
+            any(not isinstance(row[key], str) or not row[key].strip()
+                for key in ("original_query", "surrogate_query"))):
+        raise ValueError("blind row requires sample_id, original_query, and surrogate_query")
     if not isinstance(row["source_hash"], str) or not re.fullmatch(r"[0-9a-f]{64}", row["source_hash"]):
         raise ValueError("blind row source_hash must be lowercase SHA-256")
     for key in ("surrogate_guardrails", "critical_candidates"):

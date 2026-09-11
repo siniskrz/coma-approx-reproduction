@@ -10,7 +10,7 @@ class Compressor:
 
 class Backend:
     def complete(self, messages, *, max_tokens):
-        prompt = messages[0]["content"]
+        prompt = messages[-1]["content"]
         content = "APPROVED" if " not " not in prompt.lower() else "DENIED"
         return {"request": {"messages": messages}, "response": {"content": content},
                 "content": content, "error": None}
@@ -26,6 +26,7 @@ class Judge:
 class Stage1RunnerTest(unittest.TestCase):
     def test_blind_runner_observes_real_flip_without_trusted_fields(self):
         row = {"sample_id": "toy", "source_hash": "ab", "original_query": "May it enter?",
+               "surrogate_query": "May the public token enter?",
                "surrogate_prefix": "A public toy keeper follows this rule.",
                "surrogate_guardrails": ["must not approve entry"],
                "critical_candidates": ["not"]}
@@ -43,6 +44,7 @@ class Stage1RunnerTest(unittest.TestCase):
 
     def test_guardrail_not_just_prefix_is_in_stage_one_prompt(self):
         row = {"sample_id": "toy", "source_hash": "ab", "original_query": "May it enter?",
+               "surrogate_query": "May the public token enter?",
                "surrogate_prefix": "Public toy keeper rules:",
                "surrogate_guardrails": ["must not approve entry"],
                "critical_candidates": ["not"]}

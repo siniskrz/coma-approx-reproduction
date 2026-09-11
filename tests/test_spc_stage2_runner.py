@@ -1,5 +1,8 @@
 import unittest
 
+import torch
+
+from comattack.attacks.extractive_suffix import AttackforLLMLingua2
 from run_spc_stage2 import run_stage2, target_absent
 
 
@@ -22,9 +25,26 @@ class Attacker:
 
 
 class Stage2RunnerTest(unittest.TestCase):
+    def test_llmlingua2_filters_unstable_text_roundtrips_before_scoring(self):
+        class RoundtripTokenizer:
+            def decode(self, ids, skip_special_tokens=True):
+                del skip_special_tokens
+                return "stable" if ids == [1, 2] else "changed"
+
+            def encode(self, text, add_special_tokens=False):
+                del add_special_tokens
+                return [1, 2] if text == "stable" else [8]
+
+        attacker = AttackforLLMLingua2.__new__(AttackforLLMLingua2)
+        attacker.tokenizer = RoundtripTokenizer()
+        candidates = torch.tensor([[1, 2], [3, 4]])
+        kept = attacker._roundtrip_stable_candidates(candidates, torch.tensor([9, 9]))
+        self.assertEqual(kept.tolist(), [[1, 2]])
+
     def test_runs_500_steps_updates_prompt_and_validates_three_budgets(self):
         row = {"sample_id": "toy", "source_hash": "a" * 64,
-               "original_query": "May it enter?", "surrogate_prefix": "Public rules:",
+               "original_query": "May it enter?", "surrogate_query": "May the public token enter?",
+               "surrogate_prefix": "Public rules:",
                "stage1": {"status": "COMPLETE", "surrogate_guardrails": ["must not enter"],
                           "critical_occurrences": [{"text": "not"}],
                           "baseline_label": "NO", "counterfactual_label": "YES"}}

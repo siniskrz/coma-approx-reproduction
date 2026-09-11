@@ -122,7 +122,7 @@ def stage_two_inputs(row: dict) -> tuple[str, str, str, str]:
         raise ValueError("Stage-I record is missing critical_occurrences")
     target = occurrences[-1].get("text") if isinstance(occurrences[-1], dict) else None
     prefix = row.get("surrogate_prefix", row.get("public_surrogate_prefix"))
-    query = row.get("original_query")
+    query = row.get("surrogate_query")
     if not all(isinstance(value, str) and value.strip() for value in (prefix, query, target)):
         raise ValueError("Stage-II public prefix, query, or selected target is missing")
     sentence = next((value for value in guardrails
@@ -165,10 +165,9 @@ def optimize_suffix_checkpoints(
         stable = actual == ids and 1 <= len(ids) <= max_suffix_tokens
         if stable and render_prompt is not None:
             current_prompt = render_prompt(suffix)
-        if step != 1 and step != max_steps and step % checkpoint_every:
-            continue
         checkpoint = {
             "step": step,
+            "scheduled_checkpoint": step == 1 or step == max_steps or step % checkpoint_every == 0,
             "suffix": suffix,
             "suffix_token_ids": ids,
             "suffix_token_count": len(ids),

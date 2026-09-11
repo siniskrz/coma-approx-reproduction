@@ -89,9 +89,13 @@ def main() -> None:
     parser.add_argument("--top-k", type=int, default=64)
     parser.add_argument("--eval-batch-size", type=int, default=64)
     parser.add_argument("--seed", type=int, default=1234)
+    parser.add_argument("--max-items", type=int,
+                        help="optional smoke-test limit")
     args = parser.parse_args()
     if not 1 <= args.max_suffix_tokens <= 32:
         parser.error("--max-suffix-tokens must be between 1 and 32")
+    if args.max_items is not None and args.max_items < 1:
+        parser.error("--max-items must be at least 1")
 
     snapshot = Path(args.surrogate_snapshot).resolve()
     if not snapshot.is_dir() or snapshot.name != args.surrogate_revision:
@@ -126,7 +130,7 @@ def main() -> None:
     surrogate = {"model": args.surrogate_model, "revision": args.surrogate_revision,
                  "weight_sha256": actual_hash, "weight_files": weight_files,
                  "auxiliary_files": model_auxiliary_manifest(snapshot)}
-    artifacts = run_stage2(load_records(args.stage1_results), attacker, tokenizer,
+    artifacts = run_stage2(load_records(args.stage1_results)[:args.max_items], attacker, tokenizer,
                            compress_at_rate, surrogate,
                            initial_suffix=args.initial_suffix,
                            checkpoint_every=args.checkpoint_every,

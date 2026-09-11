@@ -66,7 +66,8 @@ class SPCStagesTest(unittest.TestCase):
             "baseline": {"label": "NO"}, "trials": [{"outcome": {"label": "YES"}}],
         }
         row = {"sample_id": "toy-perm-01", "source_hash": "ab" * 32,
-               "original_query": "May the token enter?", "surrogate_prefix": "Public toy policy.",
+               "original_query": "May the token enter?", "surrogate_query": "May the public token enter?",
+               "surrogate_prefix": "Public toy policy.",
                "stage1": stage1}
         self.assertEqual(stage_two_inputs(row)[2:], ("A public token is not admitted.", "not"))
 
@@ -107,6 +108,32 @@ class SPCStagesTest(unittest.TestCase):
         self.assertEqual(attacker.calls, 500)
         self.assertEqual(steps, 500)
         self.assertEqual(len(candidates), 1)
+
+    def test_optimizer_keeps_unique_stable_candidates_between_scheduled_checkpoints(self):
+        class Attacker:
+            calls = 0
+
+            def step(self, prompts, sentences, targets):
+                self.calls += 1
+                del prompts, sentences, targets
+                return 1 / self.calls, [self.calls, 2]
+
+        class Tokenizer:
+            def decode(self, ids, skip_special_tokens=True):
+                del skip_special_tokens
+                return " ".join(str(value) for value in ids)
+
+            def encode(self, text, add_special_tokens=False):
+                del add_special_tokens
+                return [int(value) for value in text.split()]
+
+        candidates, _ = optimize_suffix_checkpoints(
+            Attacker(), "prompt", "sentence", "target", Tokenizer(),
+            checkpoint_every=100,
+        )
+        self.assertEqual(len(candidates), 500)
+        self.assertFalse(candidates[24]["scheduled_checkpoint"])
+        self.assertTrue(candidates[99]["scheduled_checkpoint"])
 
 
 if __name__ == "__main__":
