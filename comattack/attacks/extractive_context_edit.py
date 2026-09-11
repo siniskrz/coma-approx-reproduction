@@ -321,9 +321,10 @@ class ContextEditAttackLLMLingua2:
             raise ValueError("Requires config or keyword arguments")
 
         self.model_name = self.config.model_name
+        device = "cuda" if torch.cuda.is_available() else "cpu"
         self.model = AutoModelForTokenClassification.from_pretrained(
-            self.model_name, device_map="auto"
-        )
+            self.model_name
+        ).to(device)
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.model_name, use_fast=True
         )

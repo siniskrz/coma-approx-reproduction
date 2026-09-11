@@ -1,7 +1,9 @@
 import os
 import json
 import argparse
+import hashlib
 import logging
+from pathlib import Path
 
 from comattack.targets.guardrail import generate_system_prompt_target
 
@@ -10,6 +12,26 @@ logging.basicConfig(
     format="%(asctime)s  %(name)-24s  %(levelname)-7s  %(message)s",
 )
 log = logging.getLogger("run_guardrail_attack")
+
+
+def validate_surrogate(args) -> dict:
+    if not args.surrogate_revision and not args.surrogate_weight_sha256:
+        return {"mode": "UNVERIFIED_MODEL_NAME_ONLY"}
+    if not args.surrogate_revision or not args.surrogate_weight_sha256:
+        raise ValueError("pinning requires both --surrogate-revision and --surrogate-weight-sha256")
+    snapshot = Path(args.surrogate_model).resolve()
+    weight = snapshot / "model.safetensors"
+    if not snapshot.is_dir() or snapshot.name != args.surrogate_revision or not weight.is_file():
+        raise ValueError("pinned surrogate must be a local revision directory containing model.safetensors")
+    digest = hashlib.sha256()
+    with weight.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    actual = digest.hexdigest()
+    if actual.lower() != args.surrogate_weight_sha256.lower():
+        raise ValueError("surrogate model.safetensors SHA-256 mismatch")
+    return {"mode": "PINNED_LOCAL_SNAPSHOT", "snapshot": str(snapshot),
+            "revision": args.surrogate_revision, "model_safetensors_sha256": actual}
 
 
 # -- target generation --------------------------------------------------------
@@ -78,6 +100,7 @@ def run_extractive_guardrail(args, dataset):
         "method": "extractive",
         "compressor": args.compressor,
         "surrogate_model": args.surrogate_model,
+        "surrogate_provenance": args.surrogate_provenance,
         "num_entries": len(dataset),
         "num_attacked": n_success,
         "num_steps": args.num_steps,
@@ -171,6 +194,7 @@ def run_abstractive_guardrail(args, dataset):
         "method": "abstractive",
         "compressor": args.compressor,
         "surrogate_model": args.surrogate_model,
+        "surrogate_provenance": args.surrogate_provenance,
         "num_entries": len(dataset),
         "num_attacked": n_attacked,
         "num_converged": n_converged,
@@ -203,6 +227,8 @@ def parse_args():
                             "qwen3-4b", "llama-3.2-3b", "gemma-3-4b"])
     p.add_argument("--surrogate-model", required=True,
                    help="HuggingFace model name for the surrogate")
+    p.add_argument("--surrogate-revision")
+    p.add_argument("--surrogate-weight-sha256")
 
     p.add_argument("--num-steps", type=int, default=200)
     p.add_argument("--batch-size", type=int, default=256)
@@ -220,6 +246,7 @@ def parse_args():
 
 def main():
     args = parse_args()
+    args.surrogate_provenance = validate_surrogate(args)
 
     log.info("Loading dataset from %s", args.data)
     with open(args.data, "r", encoding="utf-8") as f:

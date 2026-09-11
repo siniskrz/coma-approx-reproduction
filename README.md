@@ -50,6 +50,51 @@ Each RQ has a dedicated reproduction script:
 | RQ4 | `scripts/reproduce_rq4.sh` | Case studies: VSCode Cline, LangChain+Ollama
 | RQ5 | `scripts/reproduce_rq5.sh` | Defense evaluation
 
+### Auditable SPC toy run
+
+`run_spc_asr.py` evaluates low-risk fictional permission rules with a paired
+four-condition design: clean/attacked system prompts, each with and without
+LLMLingua-2 compression. It preserves the system/user role boundary, saves raw
+backend and judge evidence, treats non-exact judge answers as `UNKNOWN`, and
+reports both all-pair rates and the baseline-stable subset (`A=B=C=0`). This is
+explicitly a public approximation, not a claim of reproducing the paper's ASR.
+
+The included `data/toy_spc_permissions.json` contains 20 harmless synthetic
+examples. API keys are read only from the environment. A pinned local model
+snapshot is required and its directory name must equal the supplied revision.
+Install `requirements-spc.txt` for this limited route; it avoids the full
+repository's vLLM dependency. The ASR runner itself uses Python's HTTP client,
+while `openai` remains pinned for the repository's other API entry points.
+
+```bash
+pip install -r requirements-spc.txt
+
+python run_guardrail_attack.py \
+  --data data/toy_spc_permissions.json \
+  --output results/toy-spc-attack \
+  --compressor llmlingua2 \
+  --surrogate-model /path/to/pinned/snapshot \
+  --surrogate-revision SNAPSHOT_DIRECTORY_NAME \
+  --surrogate-weight-sha256 EXPECTED_MODEL_SAFETENSORS_SHA256 \
+  --num-steps 10 --batch-size 32 --topk 16 \
+  --eval-batch-size 8 --test-steps 2 --edit-radius 4 --seed 42
+
+python run_spc_asr.py \
+  --data data/toy_spc_permissions.json \
+  --attack-results results/toy-spc-attack/guardrail_extractive_results.jsonl \
+  --output results/toy-spc-asr/result.json \
+  --compressor-snapshot /path/to/pinned/snapshot \
+  --compressor-revision SNAPSHOT_DIRECTORY_NAME \
+  --compressor-weight-sha256 EXPECTED_MODEL_SAFETENSORS_SHA256 \
+  --compression-rate 0.6 \
+  --backend-url https://example.invalid/v1 --backend-model BACKEND_MODEL \
+  --judge-url https://example.invalid/v1 --judge-model JUDGE_MODEL \
+  --backend-key-env BACKEND_API_KEY --judge-key-env JUDGE_API_KEY
+```
+
+Use `--max-items 2` for a paid-API smoke test. Run the offline protocol tests
+with `python -m unittest tests.test_spc_asr -v`.
+
 ## Output Format
 
 Attack results are saved as JSONL files, one entry per line:

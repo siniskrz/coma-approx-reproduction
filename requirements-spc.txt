@@ -1,0 +1,6 @@
+# Versions used by the verified Windows/Python 3.12 toy run.
+torch==2.7.1
+transformers==4.48.3
+llmlingua==0.2.2
+openai==1.109.1
+sentencepiece==0.2.1
