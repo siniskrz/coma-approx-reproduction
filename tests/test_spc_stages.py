@@ -1,0 +1,113 @@
+import unittest
+
+from comattack.spc_stages import (
+    content_suffix_bounds,
+    make_stage_two_artifact,
+    optimize_suffix_checkpoints,
+    select_dropout_target,
+    stage_two_inputs,
+    validate_budget_candidates,
+)
+
+
+class SPCStagesTest(unittest.TestCase):
+    def test_suffix_bounds_exclude_bos_eos_and_padding(self):
+        self.assertEqual(content_suffix_bounds([1, 0, 0, 0, 1, 1], 2), (2, 4))
+
+    def test_stage_one_requires_observed_no_to_yes_flip(self):
+        def simulate(prompt):
+            return {"label": "YES" if "not" not in prompt.lower() else "NO",
+                    "raw": {"prompt": prompt}}
+
+        result = select_dropout_target(
+            "Public toy keeper must not approve the square badge.",
+            ["not", "badge"],
+            simulate,
+            surrogate_guardrails=["Public toy keeper must not approve the square badge."],
+        )
+        self.assertEqual(result["status"], "COMPLETE")
+        self.assertEqual(result["baseline_label"], "NO")
+        self.assertEqual(result["counterfactual_label"], "YES")
+        self.assertEqual(result["critical_occurrences"][0]["text"], "not")
+        self.assertTrue(result["trials"][0]["outcome"]["raw"])
+        self.assertEqual(result["surrogate_guardrails"],
+                         ["Public toy keeper must not approve the square badge."])
+
+    def test_stage_one_does_not_invent_a_target(self):
+        result = select_dropout_target(
+            "Public toy text.", ["missing"], lambda prompt: {"label": "NO"},
+            surrogate_guardrails=["A public toy rule."],
+        )
+        self.assertEqual(result["status"], "NO_FEASIBLE_TARGET")
+        self.assertIsNone(result["selected_target"])
+
+    def test_stage_one_rejects_missing_surrogate_guardrails(self):
+        with self.assertRaisesRegex(ValueError, "surrogate_guardrails"):
+            select_dropout_target("Public toy text.", ["toy"],
+                                  lambda prompt: {"label": "NO"},
+                                  surrogate_guardrails=[])
+
+    def test_stage_two_requires_all_three_rates(self):
+        candidates = [{"suffix": "toy marker", "suffix_token_ids": [1, 2],
+                       "suffix_token_count": 2, "suffix_roundtrip_stable": True,
+                       "best_loss": 0.1}]
+        result = validate_budget_candidates(
+            candidates, lambda suffix, rate: {"target_removed": rate != 0.6})
+        self.assertFalse(result["validated"])
+        self.assertEqual(len(result["candidates"][0]["budget_trials"]), 3)
+        with self.assertRaisesRegex(ValueError, "0.5"):
+            validate_budget_candidates(candidates, lambda suffix, rate: {}, rates=(0.6,))
+
+    def test_stage_two_emits_strict_selected_candidate_and_three_raw_trials(self):
+        stage1 = {
+            "status": "COMPLETE", "baseline_label": "NO", "counterfactual_label": "YES",
+            "selected_target": "target", "critical_occurrences": [{"text": "not"}],
+            "surrogate_guardrails": ["A public token is not admitted."],
+            "baseline": {"label": "NO"}, "trials": [{"outcome": {"label": "YES"}}],
+        }
+        row = {"sample_id": "toy-perm-01", "source_hash": "ab" * 32,
+               "original_query": "May the token enter?", "surrogate_prefix": "Public toy policy.",
+               "stage1": stage1}
+        self.assertEqual(stage_two_inputs(row)[2:], ("A public token is not admitted.", "not"))
+
+        artifact = make_stage_two_artifact(
+            row,
+            [{"suffix": "marker", "suffix_token_ids": [1], "suffix_token_count": 1,
+              "best_loss": 0.1, "suffix_roundtrip_stable": True, "step": 500}],
+            lambda suffix, rate: {"target_removed": True, "raw": {"rate": rate}},
+            {"model": "public-surrogate", "revision": "r1", "weight_sha256": "cd" * 32},
+            raw_provenance={"stage1_sha256": "ef" * 32},
+        )
+        self.assertTrue(artifact["stage2"]["validated"])
+        self.assertEqual(artifact["stage2"]["status"], "COMPLETE")
+        self.assertEqual(artifact["stage2"]["selected"]["budget_trials"][1]["raw"]["rate"], 0.6)
+        self.assertEqual(artifact["attack_suffix"], "marker")
+
+    def test_optimizer_runs_exactly_500_steps_and_drops_unstable_suffixes(self):
+        class Attacker:
+            calls = 0
+
+            def step(self, prompts, sentences, targets):
+                self.calls += 1
+                del prompts, sentences, targets
+                return 0.5, [1, 2]
+
+        class Tokenizer:
+            def decode(self, ids, skip_special_tokens=True):
+                del ids, skip_special_tokens
+                return "one two"
+
+            def encode(self, text, add_special_tokens=False):
+                del text, add_special_tokens
+                return [1, 2]
+
+        attacker = Attacker()
+        candidates, steps = optimize_suffix_checkpoints(
+            attacker, "prompt", "sentence", "target", Tokenizer(), checkpoint_every=100)
+        self.assertEqual(attacker.calls, 500)
+        self.assertEqual(steps, 500)
+        self.assertEqual(len(candidates), 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

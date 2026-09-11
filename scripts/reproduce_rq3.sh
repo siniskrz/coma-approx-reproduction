@@ -11,6 +11,9 @@ while [[ $# -gt 0 ]]; do
         --part) PART="$2"; shift 2 ;;
         --parallel) PARALLEL="$2"; shift 2 ;;
         --gpus) GPUS="$2"; shift 2 ;;
+        --judge)
+            echo "ERROR: legacy SPC surrogate-mismatch runs are disabled; use the dedicated query-suffix pipeline." >&2
+            exit 2 ;;
         --dry-run) DRY_RUN=true; shift ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
@@ -34,12 +37,12 @@ if [[ "$PART" == "all" || "$PART" == "a" ]]; then
     fi
 
     if $DRY_RUN; then
-        bash run_rq3_surrogate_mismatch.sh \
+        bash run_surrogate_mismatch.sh \
             --parallel "$PARALLEL" \
             --dry-run \
             "${MISMATCH_ARGS[@]}"
     else
-        bash run_rq3_surrogate_mismatch.sh \
+        bash run_surrogate_mismatch.sh \
             --parallel "$PARALLEL" \
             "${MISMATCH_ARGS[@]}"
     fi

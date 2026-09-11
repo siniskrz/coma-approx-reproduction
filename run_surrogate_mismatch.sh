@@ -16,7 +16,7 @@ BACKEND="meta-llama/Llama-3.1-8B-Instruct"
 STEPS=500
 SEED=42
 
-TASKS=(prom deg qa spc)
+TASKS=(prom deg qa)
 
 # ── argument parsing ─────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -29,12 +29,17 @@ while [[ $# -gt 0 ]]; do
         --steps)       STEPS="$2"; shift 2 ;;
         --seed)        SEED="$2"; shift 2 ;;
         --backend)     BACKEND="$2"; shift 2 ;;
+        --judge)
+            echo "ERROR: legacy SPC surrogate-mismatch runs are disabled; use the dedicated query-suffix pipeline." >&2
+            exit 2 ;;
         --data-pref)   DATA_PREF="$2"; shift 2 ;;
         --data-qa)     DATA_QA="$2"; shift 2 ;;
         --data-spc)    DATA_SPC="$2"; shift 2 ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
 done
+
+echo "[NOTICE] SPC is excluded; use the dedicated query-suffix pipeline."
 
 # split GPU list into array
 IFS=',' read -ra GPU_LIST <<< "${GPUS}"
@@ -89,7 +94,7 @@ launch() {
         return
     fi
 
-    local cmd="python run_rq3_surrogate_mismatch.py"
+    local cmd="python run_surrogate_mismatch.py"
     cmd+=" --target-compressor ${tgt}"
     cmd+=" --surrogate-model ${surr}"
     cmd+=" --task ${task}"
@@ -161,7 +166,7 @@ done
 if ! $DRY_RUN; then
     echo ""
     echo "--- Aggregating results into Table 5 ---"
-    python run_rq3_surrogate_mismatch.py --aggregate --output "${OUTPUT}"
+    python run_surrogate_mismatch.py --aggregate --output "${OUTPUT}"
 fi
 
 # ── summary ──────────────────────────────────────────────────────────

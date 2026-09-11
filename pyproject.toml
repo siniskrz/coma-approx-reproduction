@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "comattack"
+version = "0.1.0"
+description = "Auditable prompt-compression robustness experiments"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy",
+  "pyyaml",
+  "tqdm",
+]
+
+[project.optional-dependencies]
+spc = [
+  "torch==2.7.1",
+  "transformers==4.48.3",
+  "llmlingua==0.2.2",
+  "openai==1.109.1",
+  "sentencepiece==0.2.1",
+]
+
+[tool.setuptools.packages.find]
+include = ["comattack*", "experiments*"]

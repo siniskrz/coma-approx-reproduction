@@ -65,6 +65,7 @@ def main():
  output_path=args.output,
  target_llm=target_llm,
  judge_llm=judge_llm,
+ method_filter=method_filter,
  max_workers=args.max_workers,
  allow_empty_prompt=args.allow_empty_prompt
  )

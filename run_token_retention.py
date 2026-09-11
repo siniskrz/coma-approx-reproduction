@@ -1,394 +1,225 @@
-import os
-import sys
-import csv
-import json
-import glob
-import re
+"""Auditable critical-token removal measurement.
+
+A compressor must return one ``source_map`` entry per source-word occurrence:
+``{"start": int, "end": int, "kept": bool}``. Without it CTRR is unavailable.
+"""
+
 import argparse
+import csv
+import glob
+import json
 import logging
-from collections import defaultdict
-from typing import List, Dict, Tuple, Optional
+import os
+import re
+import sys
+from collections import Counter
 
-import numpy as np
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(name)-28s  %(levelname)-7s  %(message)s",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 log = logging.getLogger("rq3_token_retention")
-
 ALL_TASKS = ["prom", "deg", "qa", "spc"]
+CTRR_AVAILABLE = "CTRR_AVAILABLE"
+CTRR_UNAVAILABLE = "CTRR_UNAVAILABLE"
 
 
-# =========================================================================
-#  Critical token identification
-# =========================================================================
-
-def identify_critical_tokens_qa(entry: dict) -> Tuple[str, str, int]:
-    """
-    QA task: critical tokens are the answer span.
-
-    Returns (original_text, critical_span, span_start_char).
-    """
-    context = entry.get("context", "")
-    removed = entry.get("removed_span", "")
-    span_start = entry.get("span_start", -1)
-    if not removed or span_start < 0:
-        answers = entry.get("answers", {})
-        if answers:
-            removed = answers.get("text", [""])[0]
-            span_start = answers.get("answer_start", [-1])[0]
-    return context, removed, span_start
+def _word_occurrences(text):
+    return [{"word": m.group(0).lower(), "start": m.start(), "end": m.end()}
+            for m in re.finditer(r"\b\w+\b", text)]
 
 
-def identify_critical_tokens_pref(entry: dict) -> Tuple[str, str, int]:
-    """
-    Preference task: critical tokens are the deleted_words from Stage I
-    (words whose removal flips the LLM's preference).
-    """
-    context = entry.get("original_context", "")
-    deleted_words = entry.get("deleted_words", [])
-    critical_span = " ".join(deleted_words)
-    span_start = context.find(critical_span) if critical_span else -1
-    return context, critical_span, span_start
+def _explicit_ranges(entry, field):
+    value = entry.get(field)
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        return None
+    ranges = []
+    for item in value:
+        if not isinstance(item, dict):
+            return None
+        start, end = item.get("start"), item.get("end")
+        if not isinstance(start, int) or not isinstance(end, int) or start < 0 or end <= start:
+            return None
+        ranges.append((start, end))
+    return ranges
 
 
-def identify_critical_tokens_spc(entry: dict) -> Tuple[str, str, int]:
-    """
-    SPC task: critical tokens are the guardrail negation phrases
-    (e.g., 'never', 'must not', 'do not').
-
-    Since removed_phrases may be scattered across the prompt, we
-    concatenate them for n-gram overlap measurement. span_start
-    is set to the position of the first phrase found.
-    """
-    prompt = entry.get("system_prompt", "")
-    removed = entry.get("removed_phrases", [])
-    if isinstance(removed, str):
-        removed = [removed]
-    # filter to phrases actually present in the prompt
-    present = [p for p in removed if p and prompt.find(p) >= 0]
-    if not present:
-        return prompt, "", -1
-    critical_span = " ".join(present)
-    span_start = prompt.find(present[0])
-    return prompt, critical_span, span_start
-
-
-CRITICAL_TOKEN_FINDERS = {
-    "qa":   identify_critical_tokens_qa,
-    "prom": identify_critical_tokens_pref,
-    "deg":  identify_critical_tokens_pref,
-    "spc":  identify_critical_tokens_spc,
-}
+def critical_ranges(task, entry, text, *, attacked=False):
+    """Find critical character ranges, returning None when provenance is ambiguous."""
+    explicit = _explicit_ranges(entry, "critical_spans_attack" if attacked else "critical_spans_benign")
+    if explicit is None:
+        explicit = _explicit_ranges(entry, "critical_spans")
+    if explicit is not None:
+        return explicit
+    if task == "qa":
+        removed, start = entry.get("removed_span", ""), entry.get("span_start", -1)
+        if not removed:
+            answers = entry.get("answers", {})
+            texts, starts = answers.get("text", []), answers.get("answer_start", [])
+            if texts and starts:
+                removed, start = texts[0], starts[0]
+        if isinstance(start, int) and start >= 0 and text[start:start + len(removed)] == removed:
+            return [(start, start + len(removed))]
+        return None
+    if task == "spc":
+        phrases = entry.get("removed_phrases", [])
+        phrases = [phrases] if isinstance(phrases, str) else phrases
+        ranges = {(m.start(), m.end()) for phrase in phrases if phrase
+                  for m in re.finditer(re.escape(phrase), text)}
+        return sorted(ranges) or None
+    # A deleted word value cannot identify which repeated occurrence was critical.
+    return None
 
 
-# =========================================================================
-#  Retention measurement  -- extractive (token-level)
-# =========================================================================
-
-def _tokenize_words(text: str) -> List[str]:
-    """Simple whitespace + punctuation tokenizer for retention analysis."""
-    return re.findall(r"\b\w+\b", text.lower())
-
-
-def measure_token_retention_extractive(
-    original_text: str,
-    compressed_text: str,
-    critical_span: str,
-) -> Dict[str, float]:
-    """
-    Measure token-level retention for extractive compressors.
-
-    Returns dict with ctrr, nctrr, n_critical, n_noncritical.
-    """
-    orig_tokens = _tokenize_words(original_text)
-    comp_tokens = set(_tokenize_words(compressed_text))
-    crit_tokens = _tokenize_words(critical_span)
-    crit_set = set(crit_tokens)
-
-    if not crit_set:
-        return {"ctrr": float("nan"), "nctrr": float("nan"),
-                "n_critical": 0, "n_noncritical": len(orig_tokens)}
-
-    # count how many unique critical tokens appear in compressed output
-    crit_retained = sum(1 for t in crit_set if t in comp_tokens)
-    ctrr = crit_retained / len(crit_set)
-
-    non_crit_set = set(t for t in orig_tokens if t not in crit_set)
-    if non_crit_set:
-        nc_retained = sum(1 for t in non_crit_set if t in comp_tokens)
-        nctrr = nc_retained / len(non_crit_set)
-    else:
-        nctrr = float("nan")
-
-    return {
-        "ctrr": ctrr,
-        "nctrr": nctrr,
-        "n_critical": len(crit_set),
-        "n_noncritical": len(non_crit_set),
-    }
+def measure_ctrr(original_text, source_map, ranges):
+    """Compute per-sample CTRR = 1 - retained / total source occurrences."""
+    if not isinstance(source_map, list):
+        return {"status": CTRR_UNAVAILABLE, "reason": "missing_source_map"}
+    if not ranges:
+        return {"status": CTRR_UNAVAILABLE, "reason": "missing_critical_source_ranges"}
+    occurrences = _word_occurrences(original_text)
+    if len(source_map) != len(occurrences):
+        return {"status": CTRR_UNAVAILABLE, "reason": "incomplete_source_map"}
+    for expected, supplied in zip(occurrences, source_map):
+        if not isinstance(supplied, dict):
+            return {"status": CTRR_UNAVAILABLE, "reason": "invalid_source_map_entry"}
+        if (supplied.get("start"), supplied.get("end")) != (expected["start"], expected["end"]):
+            return {"status": CTRR_UNAVAILABLE, "reason": "source_map_position_mismatch"}
+        if not isinstance(supplied.get("kept"), bool):
+            return {"status": CTRR_UNAVAILABLE, "reason": "source_map_kept_not_boolean"}
+    critical = [item for item in source_map
+                if any(item["start"] < end and item["end"] > start for start, end in ranges)]
+    if not critical:
+        return {"status": CTRR_UNAVAILABLE, "reason": "no_critical_word_occurrences"}
+    retained = sum(item["kept"] for item in critical)
+    return {"status": CTRR_AVAILABLE, "ctrr": 1 - retained / len(critical),
+            "critical_occurrences": len(critical),
+            "retained_critical_occurrences": retained}
 
 
-# =========================================================================
-#  Retention measurement -- abstractive (n-gram overlap)
-# =========================================================================
-
-def _ngrams(tokens: List[str], n: int) -> List[Tuple[str, ...]]:
-    return [tuple(tokens[i:i+n]) for i in range(len(tokens) - n + 1)]
-
-
-def measure_token_retention_abstractive(
-    original_text: str,
-    compressed_text: str,
-    critical_span: str,
-) -> Dict[str, float]:
-    """
-    Measure retention for abstractive compressors via n-gram overlap.
-
-    CTRR = fraction of critical unigrams + bigrams present in compressed text.
-    NCTRR = same for non-critical tokens.
-    """
-    comp_lower = compressed_text.lower()
-    crit_tokens = _tokenize_words(critical_span)
-    orig_tokens = _tokenize_words(original_text)
-
-    if not crit_tokens:
-        return {"ctrr": float("nan"), "nctrr": float("nan"),
-                "n_critical": 0, "n_noncritical": len(orig_tokens)}
-
-    crit_set = set(crit_tokens)
-
-    # unigram + bigram overlap for critical tokens
-    crit_uni = sum(1 for t in crit_tokens if t in comp_lower)
-    crit_bi = _ngrams(crit_tokens, 2)
-    crit_bi_hit = sum(1 for bg in crit_bi if " ".join(bg) in comp_lower)
-    ctrr = (crit_uni + crit_bi_hit) / (len(crit_tokens) + max(len(crit_bi), 1))
-
-    # non-critical
-    non_crit = [t for t in orig_tokens if t not in crit_set]
-    if non_crit:
-        nc_uni = sum(1 for t in set(non_crit) if t in comp_lower)
-        nctrr = nc_uni / len(set(non_crit))
-    else:
-        nctrr = float("nan")
-
-    return {
-        "ctrr": ctrr,
-        "nctrr": nctrr,
-        "n_critical": len(crit_tokens),
-        "n_noncritical": len(set(non_crit)),
-    }
+def presence_proxy_retained_fraction(original_text, compressed_text, ranges):
+    """Unaudited bag-of-words presence diagnostic; deliberately not CTRR."""
+    words = [item["word"] for item in _word_occurrences(original_text)
+             if any(item["start"] < end and item["end"] > start for start, end in ranges)]
+    if not words:
+        return None
+    available = Counter(item["word"] for item in _word_occurrences(compressed_text))
+    return sum(min(count, available[word]) for word, count in Counter(words).items()) / len(words)
 
 
-# =========================================================================
-#  Compressor helpers
-# =========================================================================
-
-EXTRACTIVE_COMPRESSORS = {
-    "selective_context", "sc", "llmlingua1", "llmlingua", "llmlingua2",
-}
-
-def is_extractive(compressor_name: str) -> bool:
-    return compressor_name in EXTRACTIVE_COMPRESSORS
+def make_compressor(name):
+    from comattack.evaluation.e2e_eval import make_compressor as factory
+    return factory(name)
 
 
-def make_compressor(name: str):
-    from comattack.evaluation.e2e_eval import make_compressor as _mc
-    return _mc(name)
+def _compressed_text(result):
+    return result.get("compressed_prompt", result.get("compressed_text", ""))
 
-
-# =========================================================================
-#  Main analysis loop
-# =========================================================================
 
 def run_retention_analysis(args):
-    task = args.task
-    compressor_name = args.compressor
-
-    log.info("=== compressor=%s  task=%s ===", compressor_name, task)
-
-    # load attack results
-    entries = []
-    with open(args.attack_results, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                entries.append(json.loads(line))
-    log.info("Loaded %d entries from %s", len(entries), args.attack_results)
-
+    with open(args.attack_results, encoding="utf-8") as handle:
+        entries = [json.loads(line) for line in handle if line.strip()]
+    if args.task == "spc":
+        raise ValueError(
+            "SPC CTRR rejects legacy system-prompt/attacked_context artifacts; "
+            "query-suffix shared-budget results need occurrence-level joint-prompt source maps"
+        )
     if args.max_entries > 0:
         entries = entries[:args.max_entries]
-
-    compressor = make_compressor(compressor_name)
-    finder = CRITICAL_TOKEN_FINDERS.get(task)
-    if finder is None:
-        raise ValueError(f"Unknown task: {task}")
-
-    measure_fn = (measure_token_retention_extractive
-                  if is_extractive(compressor_name)
-                  else measure_token_retention_abstractive)
-
-    results = []
+    compressor, results = make_compressor(args.compressor), []
     for idx, entry in enumerate(entries):
-        original_text, critical_span, span_start = finder(entry)
-        if not critical_span:
-            continue
+        original = (entry.get("system_prompt") if args.task == "spc"
+                    else entry.get("context") or entry.get("original_context", ""))
+        attacked = entry.get("attacked_context") or entry.get("attacked_prompt") or original
+        benign_output = compressor.compress(original, rate=args.compression_rate)
+        attack_output = compressor.compress(attacked, rate=args.compression_rate)
+        benign_ranges = critical_ranges(args.task, entry, original)
+        attack_ranges = critical_ranges(args.task, entry, attacked, attacked=True)
+        benign = measure_ctrr(original, benign_output.get("source_map"), benign_ranges)
+        attack = measure_ctrr(attacked, attack_output.get("source_map"), attack_ranges)
+        row = {"idx": idx, "ctrr_benign": benign, "ctrr_attack": attack}
+        if args.presence_proxy:
+            row["presence_proxy_retained_fraction_benign"] = presence_proxy_retained_fraction(
+                original, _compressed_text(benign_output), benign_ranges or [])
+            row["presence_proxy_retained_fraction_attack"] = presence_proxy_retained_fraction(
+                attacked, _compressed_text(attack_output), attack_ranges or [])
+        results.append(row)
 
-        attacked_text = (entry.get("attacked_context")
-                         or entry.get("attacked_prompt")
-                         or original_text)
-
-        # compress benign
-        comp_benign = compressor.compress(original_text, rate=args.compression_rate)
-        comp_benign_text = comp_benign.get(
-            "compressed_prompt", comp_benign.get("compressed_text", ""))
-
-        # compress attacked
-        comp_attack = compressor.compress(attacked_text, rate=args.compression_rate)
-        comp_attack_text = comp_attack.get(
-            "compressed_prompt", comp_attack.get("compressed_text", ""))
-
-        ret_benign = measure_fn(original_text, comp_benign_text, critical_span)
-        ret_attack = measure_fn(attacked_text, comp_attack_text, critical_span)
-
-        results.append({
-            "idx": idx,
-            "ctrr_benign": ret_benign["ctrr"],
-            "nctrr_benign": ret_benign["nctrr"],
-            "ctrr_attack": ret_attack["ctrr"],
-            "nctrr_attack": ret_attack["nctrr"],
-            "ctrr_drop": ret_benign["ctrr"] - ret_attack["ctrr"],
-            "selectivity": ret_attack["nctrr"] - ret_attack["ctrr"],
-            "n_critical": ret_benign["n_critical"],
-            "n_noncritical": ret_benign["n_noncritical"],
-            "critical_span": critical_span[:80],
-        })
-
-        if (idx + 1) % 50 == 0:
-            log.info("Processed %d / %d", idx + 1, len(entries))
-
-    # aggregate
-    valid = [r for r in results
-             if not (np.isnan(r["ctrr_benign"]) or np.isnan(r["ctrr_attack"]))]
-    if not valid:
-        log.warning("No valid results to aggregate")
-        return
-
-    ctrr_b = np.mean([r["ctrr_benign"] for r in valid])
-    ctrr_a = np.mean([r["ctrr_attack"] for r in valid])
-    nctrr_b = np.nanmean([r["nctrr_benign"] for r in valid])
-    nctrr_a = np.nanmean([r["nctrr_attack"] for r in valid])
-    drop = ctrr_b - ctrr_a
-    selectivity = nctrr_a - ctrr_a
-
-    log.info("CTRR  benign=%.3f  attack=%.3f  drop=%.3f", ctrr_b, ctrr_a, drop)
-    log.info("NCTRR benign=%.3f  attack=%.3f", nctrr_b, nctrr_a)
-    log.info("Selectivity (NCTRR_atk - CTRR_atk) = %.3f", selectivity)
-
-    # save
-    out_dir = os.path.join(args.output, compressor_name, task)
-    os.makedirs(out_dir, exist_ok=True)
-
+    paired = [row for row in results
+              if row["ctrr_benign"]["status"] == CTRR_AVAILABLE
+              and row["ctrr_attack"]["status"] == CTRR_AVAILABLE]
     summary = {
-        "compressor": compressor_name,
-        "task": task,
-        "n_instances": len(valid),
+        "compressor": args.compressor, "task": args.task,
         "compression_rate": args.compression_rate,
-        "ctrr_benign": round(ctrr_b, 4),
-        "ctrr_attack": round(ctrr_a, 4),
-        "ctrr_drop": round(drop, 4),
-        "nctrr_benign": round(nctrr_b, 4),
-        "nctrr_attack": round(nctrr_a, 4),
-        "selectivity": round(selectivity, 4),
+        "ctrr_definition": "1-retained_critical_source_occurrences/total_critical_source_occurrences",
+        "ctrr_aggregation": "sample_macro_mean_on_complete_pairs",
+        "ctrr_status": CTRR_AVAILABLE if paired else CTRR_UNAVAILABLE,
+        "n_input": len(results), "n_ctrr_paired": len(paired),
+        "n_ctrr_unavailable": len(results) - len(paired),
     }
-    with open(os.path.join(out_dir, "retention_summary.json"), "w") as f:
-        json.dump(summary, f, indent=2)
+    if paired:
+        benign_values = [row["ctrr_benign"]["ctrr"] for row in paired]
+        attack_values = [row["ctrr_attack"]["ctrr"] for row in paired]
+        benign_mean = sum(benign_values) / len(benign_values)
+        attack_mean = sum(attack_values) / len(attack_values)
+        summary.update(ctrr_benign=round(benign_mean, 4), ctrr_attack=round(attack_mean, 4),
+                       ctrr_increase=round(attack_mean - benign_mean, 4))
+    else:
+        summary["reason"] = "No complete pair had occurrence-level source maps and critical spans"
 
-    with open(os.path.join(out_dir, "retention_per_instance.jsonl"), "w") as f:
-        for r in results:
-            f.write(json.dumps(r, default=str) + "\n")
-
-    log.info("Saved to %s", out_dir)
+    out_dir = os.path.join(args.output, args.compressor, args.task)
+    os.makedirs(out_dir, exist_ok=True)
+    with open(os.path.join(out_dir, "retention_summary.json"), "w", encoding="utf-8") as handle:
+        json.dump(summary, handle, indent=2)
+    with open(os.path.join(out_dir, "retention_per_instance.jsonl"), "w", encoding="utf-8") as handle:
+        for row in results:
+            handle.write(json.dumps(row) + "\n")
+    log.info("%s: %d/%d complete pairs", summary["ctrr_status"], len(paired), len(results))
     return summary
 
 
-# =========================================================================
-#  Aggregate all retention results
-# =========================================================================
-
 def aggregate_retention(output_dir):
     rows = []
-    for path in sorted(
-        glob.glob(os.path.join(output_dir, "*/*/retention_summary.json"))
-    ):
-        with open(path) as f:
-            rows.append(json.load(f))
-
+    for path in sorted(glob.glob(os.path.join(output_dir, "*/*/retention_summary.json"))):
+        with open(path, encoding="utf-8") as handle:
+            rows.append(json.load(handle))
     if not rows:
         log.warning("No retention_summary.json found under %s", output_dir)
         return
+    csv_rows = [["compressor", "task", "ctrr_status", "n_ctrr_paired",
+                 "ctrr_benign", "ctrr_attack", "ctrr_increase"]]
+    for row in sorted(rows, key=lambda item: (item["compressor"], item["task"])):
+        print(row["compressor"], row["task"], row["ctrr_status"],
+              row.get("ctrr_benign", "-"), row.get("ctrr_attack", "-"))
+        csv_rows.append([row["compressor"], row["task"], row["ctrr_status"],
+                         row["n_ctrr_paired"], row.get("ctrr_benign", ""),
+                         row.get("ctrr_attack", ""), row.get("ctrr_increase", "")])
+    with open(os.path.join(output_dir, "token_retention_table.csv"), "w", newline="", encoding="utf-8") as handle:
+        csv.writer(handle).writerows(csv_rows)
 
-    print(f"{'Compressor':<20s} {'Task':<6s} "
-          f"{'CTRR_b':>7s} {'CTRR_a':>7s} {'Drop':>7s} "
-          f"{'NCTRR_b':>8s} {'NCTRR_a':>8s} {'Select':>7s}")
-    print("-" * 80)
-
-    csv_rows = [["compressor", "task", "ctrr_benign", "ctrr_attack",
-                 "ctrr_drop", "nctrr_benign", "nctrr_attack", "selectivity"]]
-
-    for r in sorted(rows, key=lambda x: (x["compressor"], x["task"])):
-        print(f"{r['compressor']:<20s} {r['task']:<6s} "
-              f"{r['ctrr_benign']:7.3f} {r['ctrr_attack']:7.3f} "
-              f"{r['ctrr_drop']:7.3f} "
-              f"{r['nctrr_benign']:8.3f} {r['nctrr_attack']:8.3f} "
-              f"{r['selectivity']:7.3f}")
-        csv_rows.append([
-            r["compressor"], r["task"],
-            f"{r['ctrr_benign']:.4f}", f"{r['ctrr_attack']:.4f}",
-            f"{r['ctrr_drop']:.4f}",
-            f"{r['nctrr_benign']:.4f}", f"{r['nctrr_attack']:.4f}",
-            f"{r['selectivity']:.4f}",
-        ])
-
-    csv_path = os.path.join(output_dir, "token_retention_table.csv")
-    with open(csv_path, "w", newline="") as f:
-        csv.writer(f).writerows(csv_rows)
-    print(f"\nCSV saved to {csv_path}")
-
-
-# =========================================================================
-#  CLI
-# =========================================================================
 
 def parse_args():
-    p = argparse.ArgumentParser(
-        description="RQ3 Critical Token Retention Study"
-    )
-
-    p.add_argument("--attack-results",
-                   help="Path to attack results JSONL (from run_*_attack.py)")
-    p.add_argument("--compressor",
-                   help="Compressor name used to compress the input")
-    p.add_argument("--task", choices=ALL_TASKS)
-    p.add_argument("--compression-rate", type=float, default=0.6)
-    p.add_argument("--max-entries", type=int, default=-1)
-    p.add_argument("--output", default="results/rq3_retention/")
-
-    p.add_argument("--aggregate", action="store_true",
-                   help="Only aggregate existing retention results")
-    return p.parse_args()
+    parser = argparse.ArgumentParser(description="Auditable critical-token removal study")
+    parser.add_argument("--attack-results")
+    parser.add_argument("--compressor")
+    parser.add_argument("--task", choices=ALL_TASKS)
+    parser.add_argument("--compression-rate", type=float, default=0.6)
+    parser.add_argument("--max-entries", type=int, default=-1)
+    parser.add_argument("--output", default="results/rq3_retention/")
+    parser.add_argument("--presence-proxy", action="store_true",
+                        help="Report an unaudited text-presence proxy (never labeled CTRR)")
+    parser.add_argument("--aggregate", action="store_true")
+    return parser.parse_args()
 
 
 def main():
     args = parse_args()
     if args.aggregate:
         aggregate_retention(args.output)
-        return
-    if not args.attack_results or not args.compressor or not args.task:
+    elif not args.attack_results or not args.compressor or not args.task:
         log.error("--attack-results, --compressor, --task required")
         sys.exit(1)
-    run_retention_analysis(args)
+    else:
+        run_retention_analysis(args)
 
 
 if __name__ == "__main__":

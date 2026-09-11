@@ -7,15 +7,18 @@ Artifact for the paper **"When Compression Becomes an Attack Surface: Black-Box 
 COMA is a black-box adversarial framework that exploits prompt compression as an attack surface in LLM agent pipelines. It demonstrates that an adversary can craft inputs that, after compression, selectively remove or corrupt critical information -- causing downstream LLM agents to have misbehavior.
 
 The framework implements a two-stage attack:
-- **Stage I (Target Selection):** Identify which information to suppress (answer spans, guardrail negations, preference-critical keywords)
-- **Stage II (Preimage Search):** Use COMA-based optimization to find adversarial inputs that, after compression, match the target
+
+- **Stage I (Target Selection):** use a surrogate backend and semantic Judge to
+  identify a behavior-changing compression target.
+- **Stage II (Preimage Search):** optimize a short suffix that is appended only
+  to the untrusted query and makes compression drop that target.
 
 ### Tasks
 | Task | Abbrev. | Description |
 |------|---------|-------------|
 | Agent Tool Selection | ATS | Manipulate which tool/product the agent recommends |
 | Question Answering | QA | Suppress answer spans so the agent cannot answer correctly |
-| System Prompt Corruption | SPC | Remove guardrail negations (e.g., "do not" -> "") to disable safety rules |
+| System Prompt Corruption | SPC | Append an adversarial query suffix so shared-budget compression drops behavior-critical trusted content |
 
 ### Compressors Evaluated
 | Type | Compressor | Surrogate Model |
@@ -44,68 +47,113 @@ Each RQ has a dedicated reproduction script:
 
 | RQ | Script | Description |
 |----|--------|-------------|
-| RQ1 | `scripts/reproduce_rq1.sh` | Effectiveness: 3 tasks x 6 compressors
+| RQ1 | `scripts/reproduce_rq1.sh` | Effectiveness launcher for ATS/QA; legacy SPC is disabled
 | RQ2 | `scripts/reproduce_rq2.sh` | Generalization: budget sweep + backend LLMs
 | RQ3 | `scripts/reproduce_rq3.sh` | Surrogate mismatch + token retention
 | RQ4 | `scripts/reproduce_rq4.sh` | Case studies: VSCode Cline, LangChain+Ollama
 | RQ5 | `scripts/reproduce_rq5.sh` | Defense evaluation
 
-### Auditable SPC toy run
+### Reportable SPC approximation: query suffix only
 
-`run_spc_asr.py` evaluates low-risk fictional permission rules with a paired
-four-condition design: clean/attacked system prompts, each with and without
-LLMLingua-2 compression. It preserves the system/user role boundary, saves raw
-backend and judge evidence, treats non-exact judge answers as `UNKNOWN`, and
-reports both all-pair rates and the baseline-stable subset (`A=B=C=0`). This is
-explicitly a public approximation, not a claim of reproducing the paper's ASR.
+This is the only route in this repository whose output may be reported as an
+SPC approximation. The adversary receives a blind input containing the
+untrusted query and independent public-surrogate policy text; it never receives
+or changes the victim system prompt. At evaluation time, system, context, and
+query share one compression budget. The included dataset contains 20 low-risk,
+fictional permission examples, so these results are a development experiment,
+not the paper's reported ASR or a strict reproduction.
 
-The included `data/toy_spc_permissions.json` contains 20 harmless synthetic
-examples. API keys are read only from the environment. A pinned local model
-snapshot is required and its directory name must equal the supplied revision.
-Install `requirements-spc.txt` for this limited route; it avoids the full
-repository's vLLM dependency. The ASR runner itself uses Python's HTTP client,
-while `openai` remains pinned for the repository's other API entry points.
+Install the limited SPC dependencies, pin every local model snapshot and hash,
+and provide API keys only through the named environment variables:
 
 ```bash
 pip install -r requirements-spc.txt
 
-python run_guardrail_attack.py \
-  --data data/toy_spc_permissions.json \
-  --output results/toy-spc-attack \
-  --compressor llmlingua2 \
-  --surrogate-model /path/to/pinned/snapshot \
-  --surrogate-revision SNAPSHOT_DIRECTORY_NAME \
-  --surrogate-weight-sha256 EXPECTED_MODEL_SAFETENSORS_SHA256 \
-  --num-steps 10 --batch-size 32 --topk 16 \
-  --eval-batch-size 8 --test-steps 2 --edit-radius 4 --seed 42
+python prepare_spc_blind_inputs.py \
+  --private-data data/toy_spc_permissions.json \
+  --public-pool data/public_toy_surrogate_pool.json \
+  --output results/spc/blind.jsonl
+
+python run_spc_stage1.py \
+  --blind-inputs results/spc/blind.jsonl \
+  --output results/spc/stage1.jsonl \
+  --compressor-snapshot /path/to/pinned/compressor/snapshot \
+  --compressor-revision COMPRESSOR_REVISION \
+  --compressor-weight-sha256 COMPRESSOR_SHA256 \
+  --compression-rate 0.6 \
+  --backend-url https://example.invalid/v1 \
+  --backend-model SURROGATE_BACKEND_MODEL \
+  --backend-key-env SURROGATE_BACKEND_API_KEY \
+  --judge-url https://example.invalid/v1 \
+  --judge-model SURROGATE_JUDGE_MODEL \
+  --judge-key-env SURROGATE_JUDGE_API_KEY
+
+python run_spc_stage2.py \
+  --stage1-results results/spc/stage1.jsonl \
+  --output results/spc/attacks.jsonl \
+  --surrogate-snapshot /path/to/pinned/surrogate/snapshot \
+  --surrogate-model SURROGATE_MODEL \
+  --surrogate-revision SURROGATE_REVISION \
+  --surrogate-weight-sha256 SURROGATE_SHA256 \
+  --initial-suffix "robustness marker test marker" \
+  --max-suffix-tokens 32 --sample-batch-size 256 --top-k 64 \
+  --eval-batch-size 128 --checkpoint-every 25
 
 python run_spc_asr.py \
   --data data/toy_spc_permissions.json \
-  --attack-results results/toy-spc-attack/guardrail_extractive_results.jsonl \
-  --output results/toy-spc-asr/result.json \
-  --compressor-snapshot /path/to/pinned/snapshot \
-  --compressor-revision SNAPSHOT_DIRECTORY_NAME \
-  --compressor-weight-sha256 EXPECTED_MODEL_SAFETENSORS_SHA256 \
-  --compression-rate 0.6 \
+  --attack-results results/spc/attacks.jsonl \
+  --output results/spc/asr.json \
+  --compressor llmlingua2 \
+  --compressor-snapshot /path/to/pinned/compressor/snapshot \
+  --compressor-revision COMPRESSOR_REVISION \
+  --compressor-weight-sha256 COMPRESSOR_SHA256 \
+  --compression-rate 0.6 --max-suffix-tokens 32 \
+  --transfer-mode black_box \
+  --attack-surrogate-model SURROGATE_MODEL \
+  --attack-surrogate-snapshot /path/to/pinned/surrogate/snapshot \
+  --attack-surrogate-revision SURROGATE_REVISION \
+  --attack-surrogate-weight-sha256 SURROGATE_SHA256 \
   --backend-url https://example.invalid/v1 --backend-model BACKEND_MODEL \
   --judge-url https://example.invalid/v1 --judge-model JUDGE_MODEL \
   --backend-key-env BACKEND_API_KEY --judge-key-env JUDGE_API_KEY
 ```
 
-Use `--max-items 2` for a paid-API smoke test. Run the offline protocol tests
-with `python -m unittest tests.test_spc_asr -v`.
+Stage II is fixed to 500 optimization steps, a suffix of at most 32
+tokens, and validation at compression rates 0.5, 0.6, and 0.7. `run_spc_asr.py`
+rejects incomplete Stage-I evidence, unvalidated Stage-II candidates, modified
+trusted fields, provenance mismatches, and suffixes over the limit. It stores
+raw backend/Judge evidence, maps non-exact labels to `UNKNOWN`, and reports the
+paired A/B/C/D design plus the baseline-stable subset (`A=B=C=NO`). Use
+`--max-items 2` only as a paid-API smoke test.
+
+The retired `run_guardrail_attack.py`, `scripts/run_guardrail_attack.sh`, the
+SPC branch of `scripts/reproduce_rq1.sh`, and SPC in
+`run_surrogate_mismatch.py` fail closed because those paths edited trusted
+system-prompt text. The engineering boundary generator
+`run_spc_query_suffix.py` does not run Stage I/II and its artifacts are not
+eligible for ASR reporting.
+
+Run the offline protocol checks with:
+
+```bash
+python -m unittest discover -s tests -v
+```
 
 ## Output Format
 
-Attack results are saved as JSONL files, one entry per line:
+Reportable SPC attack results are saved as JSONL files, one entry per line.
+Trusted victim system/context text is deliberately absent:
 
 ```json
 {
-    "context": "original input text...",
-    "attacked_context": "adversarial input text...",
-    "best_loss": 0.023,
-    "converged": true,
-    "steps": 142
+    "id": "toy-perm-01",
+    "protocol": "PUBLIC_SURROGATE_QUERY_SUFFIX_V1",
+    "source_hash": "sha256-of-private-source",
+    "original_query": "untrusted query text...",
+    "attack_suffix": "validated suffix...",
+    "suffix_token_count": 12,
+    "stage1": {"status": "COMPLETE"},
+    "stage2": {"status": "COMPLETE", "max_steps": 500, "validated": true}
 }
 ```
 
@@ -128,10 +176,14 @@ artifact/
     targets/                # Stage I: Target generation per task
     data/                   # Package data (prompts, templates)
 
-  run_guardrail_attack.py   # Entry point: SPC task
+  prepare_spc_blind_inputs.py # Blind private victim rules from attack generation
+  run_spc_stage1.py         # Behavior-based target selection
+  run_spc_stage2.py         # Query-suffix optimization and multi-budget validation
+  run_spc_asr.py            # Paired shared-budget evaluation
+  run_guardrail_attack.py   # Disabled legacy direct-system SPC path
   run_qa_attack.py          # Entry point: QA task
   run_pref_attack.py        # Entry point: ATS task
-  run_surrogate_mismatch.py # Entry point: surrogate mismatch
+  run_surrogate_mismatch.py # Surrogate mismatch (legacy SPC path disabled)
   run_pref_attack.sh        # Batch launcher: ATS (all compressors)
   run_qa_attack.sh          # Batch launcher: QA (all compressors)
   run_surrogate_mismatch.sh  # Batch launcher: surrogate grid

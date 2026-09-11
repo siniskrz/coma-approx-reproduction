@@ -19,6 +19,7 @@ from .coma_utils import (
     _ppl_control_loss,
     _token_cls_loss,
 )
+from ..spc_query_suffix import configure_right_padding, target_span_mask, validate_prompt_batch
 
 class AttackEvaluator(object):
     """
@@ -139,7 +140,9 @@ class AttackforLLMLingua1(object):
         """
         device = self.model.device
         suffix_slice, target_slice = find_slices_from_token(self.tokenizer, prompt, guardrail_sentence, guardrail_keyword, self.config.suffix_length)
-        full_ids = self.tokenizer(prompt, return_tensors="pt").input_ids  # shape = [1, T]
+        full_ids = self.tokenizer(prompt, return_tensors="pt").input_ids.to(device)  # shape = [1, T]
+        if self.best_candidates is not None:
+            full_ids[:, suffix_slice] = self.best_candidates.to(device)
         suffix_ids = full_ids[:, suffix_slice.start:suffix_slice.stop].to(device=device, dtype=torch.long).squeeze(0)  # shape = [suffix_len]
         gradients = self.llmlingua1_gradients(self.model, full_ids, suffix_slice, target_slice, device)
         gradients = torch.nan_to_num(gradients, nan=0.0, posinf=0.0, neginf=0.0) # avoid nan and inf shape = [suffix_len, vocab_size]
@@ -180,7 +183,8 @@ class AttackforLLMLingua2(object):
     """
     A class to attack the llmlingua2
     """
-    def __init__(self, config: Optional[AttackConfig] = None, **config_kwargs):
+    def __init__(self, config: Optional[AttackConfig] = None, *, model=None,
+                 tokenizer=None, **config_kwargs):
         if config is not None:
             self.config = config
         elif config_kwargs:
@@ -188,8 +192,14 @@ class AttackforLLMLingua2(object):
         else:
             raise ValueError("AttackforLLMLingua2 requires config=AttackConfig(model_name='...') or model_name='...'")
         self.model_name = self.config.model_name
-        self.model = AutoModelForTokenClassification.from_pretrained(self.model_name, device_map="auto")
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, use_fast=True, return_offset_mapping=True)
+        load_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model = (model if model is not None else
+                      AutoModelForTokenClassification.from_pretrained(self.model_name)).to(load_device)
+        self.tokenizer = configure_right_padding(
+            tokenizer if tokenizer is not None else AutoTokenizer.from_pretrained(
+                self.model_name, use_fast=True, return_offset_mapping=True,
+            )
+        )
         self.nonascii_toks = get_nonascii_toks_stable(self.tokenizer)
 
         self.device = self.model.device
@@ -204,12 +214,14 @@ class AttackforLLMLingua2(object):
         # Surrogate CausalLM for PPL-based candidate scoring
         surrogate_name = getattr(self.config, 'surrogate_model_name', None)
         if surrogate_name:
+            surrogate_dtype = torch.float16 if load_device.type == "cuda" else torch.float32
             self.surrogate_model = AutoModelForCausalLM.from_pretrained(
-                surrogate_name, device_map="auto", torch_dtype=torch.float16,
-            )
+                surrogate_name, torch_dtype=surrogate_dtype,
+            ).to(load_device)
             self.surrogate_tokenizer = AutoTokenizer.from_pretrained(
                 surrogate_name, use_fast=True,
             )
+            configure_right_padding(self.surrogate_tokenizer)
             if self.surrogate_tokenizer.pad_token is None:
                 self.surrogate_tokenizer.pad_token = self.surrogate_tokenizer.eos_token
         else:
@@ -288,12 +300,12 @@ class AttackforLLMLingua2(object):
             for i in range(batch_num):
                 batch_full_ids = eval_full_ids[i*eval_batch_size: (i+1)*eval_batch_size, :]
                 batch_eval_logits = eval_logits[i*eval_batch_size: (i+1)*eval_batch_size, :, :]
-                batch_loss = self.llmlingua2_loss(
-                    logits=batch_eval_logits,
-                    suffix_slice=suffix_slice,
-                    target_slice=target_slice,
-                    ids=batch_full_ids,
-                )
+                target_logits = batch_eval_logits[:, target_slice, :]
+                labels = torch.zeros(target_logits.shape[:2], device=target_logits.device,
+                                     dtype=torch.long)
+                batch_loss = F.cross_entropy(
+                    target_logits.transpose(1, 2), labels, reduction="none"
+                ).mean(dim=1)
                 losses.append(batch_loss.detach().cpu())
         return torch.cat(losses, dim=0).numpy()  # [C]
 
@@ -343,7 +355,9 @@ class AttackforLLMLingua2(object):
         """
         device = self.model.device
         suffix_slice, target_slice = find_slices_from_token(self.tokenizer, prompt, guardrail_sentence, guardrail_keyword, self.config.suffix_length)
-        full_ids = self.tokenizer(prompt, return_tensors="pt").input_ids  # shape = [1, T]
+        full_ids = self.tokenizer(prompt, return_tensors="pt").input_ids.to(device)  # shape = [1, T]
+        if self.best_candidates is not None:
+            full_ids[:, suffix_slice] = self.best_candidates.to(device)
         suffix_ids = full_ids[:, suffix_slice.start:suffix_slice.stop].to(device=device, dtype=torch.long).squeeze(0)  # shape = [suffix_len]
         gradients = self.llmlingua2_gradients(self.model, full_ids, suffix_slice, target_slice, device)
         gradients = torch.nan_to_num(gradients, nan=0.0, posinf=0.0, neginf=0.0) # shape = [suffix_len, vocab_size]
@@ -535,6 +549,7 @@ class MultiplePromptsAttackforLLMlingua1(AttackforLLMLingua1):
         """
         Run one COMA step attacking LLMLingua1 across multiple prompts with shared suffix.
         """
+        validate_prompt_batch(prompts, guardrail_sentences, guardrail_keywords)
         suffix_slices, target_slices = [], []
         for prompt, guardrail_sentence, guardrail_keyword in zip(prompts, guardrail_sentences, guardrail_keywords):
             suffix_slice, target_slice = find_slices_from_token(self.tokenizer, prompt, guardrail_sentence, guardrail_keyword, self.config.suffix_length)
@@ -655,17 +670,15 @@ class MultiplePromptsAttackforLLMlingua2(AttackforLLMLingua2):
         # 4) Forward pass (pass attention_mask to avoid padding contamination)
         logits = model(inputs_embeds=full_embeds, attention_mask=attention_mask).logits  # [B,T,V]
 
-        # 5) target_mask: loss computed only on suffix positions that are not padding
-        suffix_mask = torch.zeros((B, T), device=device, dtype=torch.bool)  # [B,T]
-        suffix_mask.scatter_(1, pos, torch.ones((B, suffix_length), device=device, dtype=torch.bool))
-
-        target_mask = suffix_mask & attention_mask.bool()  # [B,T]
-
-        shift_logits = logits[:, :-1, :]          # [B,T-1,V]
-        shift_labels = full_ids[:, 1:]           # [B,T-1]
-        shift_mask   = target_mask[:, 1:].float()# [B,T-1]
-
-        loss = self.batch_llmlingua2_loss(shift_logits, shift_labels, shift_mask)
+        # Token-classification labels are aligned with their input token; the
+        # deletion objective therefore belongs on target_slices, not the query
+        # suffix and not a next-token-shifted position.
+        target_mask = torch.tensor(
+            target_span_mask(target_slices, attention_mask.detach().cpu().tolist()),
+            device=device,
+            dtype=torch.bool,
+        )
+        loss = self.batch_llmlingua2_loss(logits, full_ids, target_mask.float())
         if loss.ndim > 0:  # per-example vector -> mean
             loss = loss.mean()
 
@@ -691,10 +704,8 @@ class MultiplePromptsAttackforLLMlingua2(AttackforLLMLingua2):
                 batch_mask = eval_attention_mask[start:start + eval_batch_size, :]
                 output = model(input_ids=batch_ids, attention_mask=batch_mask)
                 logits = output.logits
-                shift_logits = logits[:, :-1, :]
-                shift_labels = batch_ids[:, 1:]
-                shift_mask = eval_target_mask[start:start + eval_batch_size, 1:].float()
-                loss = self.batch_llmlingua2_loss(shift_logits, shift_labels, shift_mask)
+                batch_target_mask = eval_target_mask[start:start + eval_batch_size].float()
+                loss = self.batch_llmlingua2_loss(logits, batch_ids, batch_target_mask)
                 all_losses.append(loss)
             per_sample_losses = torch.cat(all_losses, dim=0)  # [C*B]
             per_sample_losses = per_sample_losses.reshape(C, B)
@@ -736,6 +747,7 @@ class MultiplePromptsAttackforLLMlingua2(AttackforLLMLingua2):
         """
         Run one COMA step attacking LLMLingua2 across multiple prompts with shared suffix.
         """
+        validate_prompt_batch(prompts, guardrail_sentences, guardrail_keywords)
         suffix_slices, target_slices = [], []
         for prompt, guardrail_sentence, guardrail_keyword in zip(prompts, guardrail_sentences, guardrail_keywords):
             suffix_slice, target_slice = find_slices_from_token(self.tokenizer, prompt, guardrail_sentence, guardrail_keyword, self.config.suffix_length)
@@ -745,6 +757,10 @@ class MultiplePromptsAttackforLLMlingua2(AttackforLLMLingua2):
         enc = self.tokenizer(prompts, return_tensors="pt", padding=True)
         full_ids = enc.input_ids.to(device=device)  # shape = [B, T]
         attention_mask = enc.attention_mask.to(device=device)
+        if self.best_candidates is not None:
+            best = self.best_candidates.to(device)
+            for row, suffix_slice in enumerate(suffix_slices):
+                full_ids[row, suffix_slice] = best
         suffix_ids = full_ids[0, suffix_slices[0].start:suffix_slices[0].stop].clone()  # shape = [suffix_len]
         gradients, target_mask = self.batch_llmlingua2_gradients(self.model, full_ids, suffix_slices, target_slices, attention_mask, device)
         gradients = torch.nan_to_num(gradients, nan=0.0, posinf=0.0, neginf=0.0)  # shape = [suffix_len, vocab_size]

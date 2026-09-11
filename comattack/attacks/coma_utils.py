@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import (AutoTokenizer, AutoModelForCausalLM, AutoModelForTokenClassification)
+from ..spc_stages import content_suffix_bounds
 class NPEncoder(json.JSONEncoder):
 
     def default(self, obj):
@@ -281,9 +282,8 @@ def find_suffix_from_token(tokenizer, prompt, suffix_length: int = 20):
     """
     Find the token-level suffix slice (last `suffix_length` tokens) in the prompt.
     """
-    full_ids = tokenizer(prompt, return_tensors="pt").input_ids  # [1, T]
-    T = full_ids.size(1)
-    return T - suffix_length, T
+    encoding = tokenizer(prompt, return_tensors="pt", return_special_tokens_mask=True)
+    return content_suffix_bounds(encoding.special_tokens_mask[0].tolist(), suffix_length)
 
 def find_slices_from_token(tokenizer, prompt, guardrail_sentence, guardrail_keyword, suffix_length: int = 20):
     """

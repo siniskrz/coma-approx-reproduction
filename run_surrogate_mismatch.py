@@ -47,6 +47,18 @@ ABSTRACTIVE_HF_NAMES = {
 ALL_TASKS = ["prom", "deg", "qa", "spc"]
 SAMPLE_SIZE = 100
 
+LEGACY_SPC_ERROR = (
+    "SPC is disabled in run_surrogate_mismatch.py because its legacy path "
+    "modifies trusted system-prompt content. Use the dedicated query-suffix "
+    "pipeline: prepare_spc_blind_inputs.py, run_spc_stage1.py, "
+    "run_spc_stage2.py, then run_spc_asr.py."
+)
+
+
+def reject_legacy_spc_task(task):
+    if task == "spc":
+        raise ValueError(LEGACY_SPC_ERROR)
+
 
 # ---- data loading and target generation ---------------------------------
 
@@ -207,6 +219,7 @@ def get_attacked_texts(results, task):
 
 def run_single_config(args):
     task = args.task
+    reject_legacy_spc_task(task)
     target = args.target_compressor
     surrogate = args.surrogate_model
 
@@ -232,12 +245,15 @@ def run_single_config(args):
     )
     compressor = make_compressor(target)
     backend = make_backend_llm(args.backend_llm, provider=args.llm_provider)
+    judge = (make_backend_llm(args.judge_llm, provider=args.llm_provider)
+             if task == "spc" else None)
     attacked_texts = get_attacked_texts(results, task)
 
     eval_result = evaluate_dataset(
         dataset=dataset, attacked_texts=attacked_texts,
         compressor=compressor, backend_llm=backend,
         task=task, compression_rate=args.compression_rate,
+        judge_llm=judge,
     )
     asr = eval_result["asr"]
     log.info("ASR = %.4f  (%d / %d)", asr,
@@ -257,8 +273,10 @@ def run_single_config(args):
         "asr": asr,
         "successes": eval_result["successes"],
         "total": eval_result["total"],
+        "unknown": eval_result["unknown"],
         "compression_rate": args.compression_rate,
         "backend_llm": args.backend_llm,
+        "judge_llm": args.judge_llm if task == "spc" else None,
         "num_steps": args.num_steps,
         "seed": args.seed,
     }
@@ -336,6 +354,8 @@ def parse_args():
     p.add_argument("--data-spc", default="data/guardrail_dataset.json")
 
     p.add_argument("--backend-llm", default="meta-llama/Llama-3.1-8B-Instruct")
+    p.add_argument("--judge-llm",
+                   help="reserved; legacy SPC mismatch execution is disabled")
     p.add_argument("--llm-provider", default="auto",
                    choices=["auto", "server", "offline"])
     p.add_argument("--compression-rate", type=float, default=0.6)
@@ -365,6 +385,10 @@ def main():
     if not args.target_compressor or not args.surrogate_model or not args.task:
         log.error("--target-compressor, --surrogate-model, --task required")
         sys.exit(1)
+    try:
+        reject_legacy_spc_task(args.task)
+    except ValueError as exc:
+        raise SystemExit(f"ERROR: {exc}") from None
     run_single_config(args)
 
 

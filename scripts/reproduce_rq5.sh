@@ -27,8 +27,7 @@ echo "--- Defense 1: Perplexity-based Detection ---"
 
 for TASK_CFG in \
     "qa:results/rq1/qa/extractive_llmlingua1/qa_extractive_results.jsonl" \
-    "pref:results/rq1/pref/extractive_llmlingua1/pref_extractive_results.jsonl" \
-    "spc:results/rq1/spc/extractive_llmlingua1/guardrail_extractive_results.jsonl"; do
+    "pref:results/rq1/pref/extractive_llmlingua1/pref_extractive_results.jsonl"; do
 
     IFS=: read -r TASK RESULTS_FILE <<< "$TASK_CFG"
 
@@ -68,8 +67,7 @@ echo "--- Defense 2: BLEU-based Detection ---"
 
 for TASK_CFG in \
     "qa:results/rq1/qa/extractive_llmlingua1/qa_extractive_results.jsonl" \
-    "pref:results/rq1/pref/extractive_llmlingua1/pref_extractive_results.jsonl" \
-    "spc:results/rq1/spc/extractive_llmlingua1/guardrail_extractive_results.jsonl"; do
+    "pref:results/rq1/pref/extractive_llmlingua1/pref_extractive_results.jsonl"; do
 
     IFS=: read -r TASK RESULTS_FILE <<< "$TASK_CFG"
 
@@ -109,8 +107,7 @@ echo "--- Defense 3: LLM-based Detection ---"
 
 for TASK_CFG in \
     "qa:results/rq1/qa/extractive_llmlingua1/qa_extractive_results.jsonl" \
-    "pref:results/rq1/pref/extractive_llmlingua1/pref_extractive_results.jsonl" \
-    "spc:results/rq1/spc/extractive_llmlingua1/guardrail_extractive_results.jsonl"; do
+    "pref:results/rq1/pref/extractive_llmlingua1/pref_extractive_results.jsonl"; do
 
     IFS=: read -r TASK RESULTS_FILE <<< "$TASK_CFG"
 
