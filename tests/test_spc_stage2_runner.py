@@ -1,9 +1,13 @@
 import unittest
 
-import torch
-
-from comattack.attacks.extractive_suffix import AttackforLLMLingua2
 from run_spc_stage2 import run_stage2, target_absent
+
+try:
+    import torch
+    from comattack.attacks.extractive_suffix import AttackforLLMLingua2
+except ImportError:
+    torch = None
+    AttackforLLMLingua2 = None
 
 
 class Tokenizer:
@@ -38,6 +42,7 @@ class Stage2RunnerTest(unittest.TestCase):
                 "trials": [{"target_prompt": "must enter", "deleted_occurrence": occurrence,
                             "outcome": {"label": "YES", "backend": backend, "judge": yes}}]}
 
+    @unittest.skipUnless(torch is not None, "requires optional SPC torch dependency")
     def test_llmlingua2_filters_unstable_text_roundtrips_before_scoring(self):
         class RoundtripTokenizer:
             def decode(self, ids, skip_special_tokens=True):
