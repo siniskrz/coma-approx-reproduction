@@ -24,3 +24,6 @@ spc = [
 
 [tool.setuptools.packages.find]
 include = ["comattack*", "experiments*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
