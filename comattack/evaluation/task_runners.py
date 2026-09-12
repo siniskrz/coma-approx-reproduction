@@ -6,8 +6,6 @@ from llmlingua import PromptCompressor
 from transformers import GPT2LMHeadModel, GPT2TokenizerFast
 
 from comattack.evaluation.inference import qwen3_inference, llama3_inference, phi4_inference, deepseekr1_inference, mistral2_inference, llama2_inference
-# EditPrompt was in legacy utils/get_edit_token.py — import deferred until needed
-# from comattack.utils.get_edit_token import EditPrompt
 
 
 
@@ -66,65 +64,6 @@ class Product_recommendation():
             print("-"*10 + f"Finish inference with {name}!" + "-"*10)
             # print("-"*10 + f"Finish inference with {name}!" + "-"*10)
 
-    def token_level_test(self, dataset, model_name, phrase_model_name, flag):
-        """
-        Check the token level test. 
-        1. In the demo level experiment, we decrease the ppl of high ppl words, these words will be remove
-        2. We increase the ppl of low ppl words, these words will be maintained
-        # 3. We degrade the ppl of keywords, these keywords will be removed
-        """
-
-        Edit = EditPrompt(
-            dataset=dataset,
-            model_name=model_name,
-            phrase_model_name=phrase_model_name,
-        ) 
-        
-        print(f"----------Process the {dataset}.----------")
-        model = GPT2LMHeadModel.from_pretrained(self.compression_model_name, device_map='auto')
-        tokenizer = GPT2TokenizerFast.from_pretrained(self.compression_model_name)
-        model.eval()
-        output_list = []
-        le = 20
-        result = 0
-        dict_num = 0
-        for data_entry in tqdm(dataset):
-            output_dict = {}
-            for key, value in data_entry.items():
-                dict_num += 1
-                target_ppl_words = Edit.find_high_and_low_ppl_words(
-                    sentence=value["original"],
-                    top_k=20,
-                    model=model,
-                    tokenizer=tokenizer,
-                    flag=flag
-                )
-                original_compressed = self.compression_model.compress_prompt(
-                    value["original"],
-                    instruction="",
-                    question="",
-                    target_token=le,
-                )
-                original_compressed = original_compressed["compressed_prompt"]
-                optimized_compressed = self.compression_model.compress_prompt(
-                    value["replaced"],
-                    instruction="",
-                    question="",
-                    target_token=le,
-                )
-                optimized_compressed = optimized_compressed["compressed_prompt"]
-                # output = False
-                for word, _ in target_ppl_words:
-                    if word in original_compressed and word not in optimized_compressed:
-                        # output = True
-                        result += 1
-                        break
-        
-        output = result / dict_num
-        print(f"-------------------The result is: {output}-------------------")
-
-        return output
-    
     def keywords_test(self, dataset, model_name, phrase_model_name, flag):
         """
         Detect whether the keywords can be removed or maintained.
