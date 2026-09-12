@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare public-surrogate SPC inputs while keeping trusted toy rules private."""
+"""Prepare four-source SPC inputs while keeping trusted rules private."""
 
 from __future__ import annotations
 
@@ -25,8 +25,8 @@ def load_rows(path: Path) -> list[dict]:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--private-data", default=str(ROOT / "data" / "toy_spc_permissions_v2.json"))
-    parser.add_argument("--public-pool", default=str(ROOT / "data" / "public_toy_surrogate_pool_v2.json"))
+    parser.add_argument("--private-data", default=str(ROOT / "data" / "four_source_spc_permissions_20260912.json"))
+    parser.add_argument("--public-pool", default=str(ROOT / "data" / "four_source_spc_surrogate_pool_20260912.json"))
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
 

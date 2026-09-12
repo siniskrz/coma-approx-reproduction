@@ -168,7 +168,19 @@ class LLMLingua2:
         self.compressor.model_name = self.tokenizer_family
 
     def compress(self, text: str) -> dict:
-        raw = self.compressor.compress_prompt(text, rate=self.rate)
+        return self.compress_at_rate(text, self.rate)
+
+    def compress_at_rate(self, text: str, rate: float) -> dict:
+        """Run the pinned LLMLingua-2 word-ranking/token-budget path."""
+        raw = self.compressor.compress_prompt(
+            text,
+            rate=rate,
+            use_context_level_filter=False,
+            use_token_level_filter=True,
+            token_to_word="mean",
+            force_tokens=[],
+            chunk_end_tokens=[".", "\n"],
+        )
         if not isinstance(raw, dict) or not isinstance(raw.get("compressed_prompt"), str):
             raise ValueError("LLMLingua2 returned no compressed_prompt")
         return {"text": raw["compressed_prompt"], "raw": raw}

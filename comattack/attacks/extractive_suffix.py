@@ -1,4 +1,5 @@
 import math
+import string
 from typing import Optional, List
 import numpy as np
 import torch
@@ -184,7 +185,8 @@ class AttackforLLMLingua2(object):
     A class to attack the llmlingua2
     """
     def __init__(self, config: Optional[AttackConfig] = None, *, model=None,
-                 tokenizer=None, **config_kwargs):
+                 tokenizer=None, rank_tokenizer=None,
+                 compression_rates=(0.5, 0.6, 0.7), **config_kwargs):
         if config is not None:
             self.config = config
         elif config_kwargs:
@@ -208,8 +210,31 @@ class AttackforLLMLingua2(object):
         self.vocab_size = get_embedding_matrix(self.model).shape[0]
         self.best_loss = float('inf')
         self.best_candidates = None
+        self.last_step_loss = float('inf')
+        self.last_step_metrics = None
+        self.best_metrics = None
         self.loss_weight1 = getattr(self.config, 'loss_weight1', 1.0)
         self.loss_weight2 = getattr(self.config, 'loss_weight2', 1.0)
+        self.rank_tokenizer = rank_tokenizer
+        self.compression_rates = tuple(compression_rates)
+        extras = getattr(self.config, "_extra", {})
+        self.target_loss_weight = float(getattr(
+            self.config, "target_loss_weight", extras.get("target_loss_weight", 0.0)))
+        self.margin_hinge_weight = float(getattr(
+            self.config, "margin_hinge_weight", extras.get("margin_hinge_weight", 0.0)))
+        self.margin_delta = float(getattr(
+            self.config, "margin_delta", extras.get("margin_delta", 0.0)))
+        self.coordinate_width = int(getattr(
+            self.config, "coordinate_width", extras.get("coordinate_width", 1)))
+        self.require_clean_target_retention = bool(getattr(
+            self.config, "require_clean_target_retention",
+            extras.get("require_clean_target_retention", False)))
+        if self.target_loss_weight < 0 or self.margin_hinge_weight < 0 or self.margin_delta < 0:
+            raise ValueError("composite loss weights and margin_delta must be non-negative")
+        if self.coordinate_width not in (1, 2):
+            raise ValueError("coordinate_width must be 1 or 2")
+        if not self.compression_rates or any(not 0 < rate < 1 for rate in self.compression_rates):
+            raise ValueError("compression_rates must contain values between zero and one")
 
         # Surrogate CausalLM for PPL-based candidate scoring
         surrogate_name = getattr(self.config, 'surrogate_model_name', None)
@@ -228,16 +253,118 @@ class AttackforLLMLingua2(object):
             self.surrogate_model = None
             self.surrogate_tokenizer = None
 
+    def _starts_word(self, token: str, sentencepiece: bool) -> bool:
+        if token.startswith("##"):
+            return False
+        if sentencepiece:
+            return token.startswith(("▁", "Ġ")) or token in string.punctuation
+        return True
+
+    def _rank_token_count(self, tokens: List[str]) -> int:
+        if self.rank_tokenizer is None:
+            return 1
+        # LLMLingua-2 ranks the merged XLM-R word with its leading ``▁``
+        # marker intact; converting to a sentence first silently removes it.
+        word = "".join(
+            token[2:] if token.startswith("##") else token for token in tokens
+        )
+        try:
+            return max(1, len(self.rank_tokenizer.encode(word, add_special_tokens=False)))
+        except TypeError:
+            return max(1, len(self.rank_tokenizer.encode(word)))
+
+    def _budget_margin_metrics(self, logits, ids, attention_mask, target_mask):
+        """Return the objective and the raw LLMLingua-2 budget diagnostics."""
+        keep_probs = torch.softmax(logits, dim=-1)[..., 1]
+        special_ids = set(self.tokenizer.all_special_ids)
+        target_loss_weight = getattr(self, "target_loss_weight", 0.0)
+        margin_hinge_weight = getattr(self, "margin_hinge_weight", 0.0)
+        margin_delta = getattr(self, "margin_delta", 0.0)
+        objectives, target_keep_scores, signed_margins, worst_margins = [], [], [], []
+        for row in range(ids.size(0)):
+            row_ids = ids[row].detach().cpu().tolist()
+            row_attention = attention_mask[row].detach().cpu().bool().tolist()
+            tokens = self.tokenizer.convert_ids_to_tokens(row_ids)
+            active_tokens = [token for token, token_id, active in zip(tokens, row_ids, row_attention)
+                             if active and token_id not in special_ids]
+            sentencepiece = any(token.startswith(("▁", "Ġ")) for token in active_tokens)
+            groups = []
+            for position, (token, token_id, active) in enumerate(zip(tokens, row_ids, row_attention)):
+                if not active or token_id in special_ids:
+                    continue
+                if not groups or self._starts_word(token, sentencepiece):
+                    groups.append(([position], [token]))
+                else:
+                    groups[-1][0].append(position)
+                    groups[-1][1].append(token)
+            if not groups:
+                raise ValueError("LLMLingua-2 budget loss found no content words")
+            word_scores = torch.stack([
+                keep_probs[row, positions].mean() for positions, _ in groups
+            ])
+            weights = torch.tensor([
+                self._rank_token_count(group_tokens) for _, group_tokens in groups
+            ], device=word_scores.device)
+            ranked_scores = torch.repeat_interleave(word_scores, weights)
+            target_positions = target_mask[row].bool()
+            target_scores = [word_scores[index] for index, (positions, _) in enumerate(groups)
+                             if target_positions[positions].any()]
+            if not target_scores:
+                raise ValueError("LLMLingua-2 budget loss found no target word")
+            # The compressed phrase is absent as soon as any constituent word
+            # is removed, so the weakest target word controls the margin.
+            target_score = torch.stack(target_scores).min()
+            margins = torch.stack([
+                target_score - torch.quantile(ranked_scores, 1.0 - rate + 0.01)
+                for rate in self.compression_rates
+            ])
+            worst_margin = margins.max()
+            # Optional composite objective: lower the target's absolute keep
+            # probability while requiring a configurable negative margin.
+            # Defaults remain the paper-aligned raw margin objective.
+            objective = worst_margin
+            if target_loss_weight:
+                objective = objective + target_loss_weight * target_score
+            if margin_hinge_weight:
+                objective = objective + margin_hinge_weight * torch.relu(
+                    worst_margin + margin_delta)
+            objectives.append(objective)
+            target_keep_scores.append(target_score)
+            signed_margins.append(margins)
+            worst_margins.append(worst_margin)
+        return {
+            "objective_loss": torch.stack(objectives),
+            "target_keep_score": torch.stack(target_keep_scores),
+            "signed_margins": torch.stack(signed_margins),
+            "worst_signed_margin": torch.stack(worst_margins),
+        }
+
+    def _budget_margin_losses(self, logits, ids, attention_mask, target_mask):
+        """Compatibility wrapper returning only the optimized objective."""
+        return self._budget_margin_metrics(
+            logits, ids, attention_mask, target_mask)["objective_loss"]
+
     def llmlingua2_loss(self, logits, suffix_slice, target_slice, ids):
-        """
-        Combined loss for LLMLingua2: token classification + PPL control.
-        PPL term is only added when logits have vocab-sized last dim (joint model);
-        for standard 2-class TokenClassification models it is skipped.
-        """
-        loss = self.loss_weight1 * _token_cls_loss(logits, suffix_slice, target_slice, ids)
-        if logits.size(-1) > 2:
-            loss = loss + self.loss_weight2 * _ppl_control_loss(logits, suffix_slice, target_slice, ids)
-        return loss
+        """Official COMA optimization loss: classify target tokens as removed."""
+        del suffix_slice
+        if ids.dim() == 1:
+            ids = ids.unsqueeze(0)
+        target_logits = logits[:, target_slice, :]
+        labels = torch.zeros(target_logits.shape[:-1], dtype=torch.long,
+                             device=target_logits.device)
+        cls_loss = self.loss_weight1 * F.cross_entropy(
+            target_logits.reshape(-1, target_logits.size(-1)), labels.reshape(-1)
+        )
+        if self.margin_hinge_weight or self.target_loss_weight:
+            ids2 = ids if ids.dim() == 2 else ids.unsqueeze(0)
+            attention_mask = torch.ones_like(ids2)
+            target_mask = torch.zeros_like(ids2, dtype=torch.bool)
+            target_mask[:, target_slice] = True
+            raw = self._budget_margin_metrics(logits, ids2, attention_mask, target_mask)
+            cls_loss = cls_loss + self.target_loss_weight * raw["target_keep_score"].mean()
+            cls_loss = cls_loss + self.margin_hinge_weight * torch.relu(
+                raw["worst_signed_margin"].mean() + self.margin_delta)
+        return cls_loss
 
     def llmlingua2_gradients(
         self,
@@ -282,12 +409,34 @@ class AttackforLLMLingua2(object):
 
     def _sample_control(self, control_toks, grad, sample_batch_size, topk=256, sample_temp=1.0, generator=None):
         """Delegate to standalone sample_control."""
-        return sample_control(
+        candidates = sample_control(
             control_toks=control_toks, grad=grad,
             nonascii_toks=self.nonascii_toks, vocab_size=self.vocab_size,
             sample_batch_size=sample_batch_size, topk=topk,
             sample_temp=sample_temp, generator=generator,
         )
+        if getattr(self, "coordinate_width", 1) == 2:
+            candidates = self._add_second_coordinate(candidates, control_toks)
+        return candidates
+
+    @staticmethod
+    def _add_second_coordinate(candidates, incumbent):
+        """Turn half of one-token proposals into two-token proposals in-place."""
+        if incumbent.numel() < 2 or candidates.size(0) < 2:
+            return candidates
+        changed = candidates.ne(incumbent).float().argmax(dim=1)
+        has_change = candidates.ne(incumbent).any(dim=1)
+        widened = candidates.clone()
+        for row in range(0, candidates.size(0), 2):
+            if not has_change[row]:
+                continue
+            for offset in range(1, candidates.size(0)):
+                donor = (row + offset) % candidates.size(0)
+                donor_pos = changed[donor]
+                if has_change[donor] and donor_pos != changed[row]:
+                    widened[row, donor_pos] = candidates[donor, donor_pos]
+                    break
+        return widened
 
     def _roundtrip_stable_candidates(self, candidates, fallback):
         stable = [
@@ -301,25 +450,46 @@ class AttackforLLMLingua2(object):
             return candidates[torch.tensor(stable, device=candidates.device)]
         return fallback.unsqueeze(0)
 
-    def _per_candidate_cls_losses(self, eval_logits, eval_full_ids, suffix_slice, target_slice):
-        """
-        Compute per-candidate classification loss. Returns numpy array of shape [C].
-        """
+    def _per_candidate_budget_metrics(self, eval_logits, eval_full_ids, suffix_slice,
+                                      target_slice):
+        """Compute objective and raw budget diagnostics for every candidate."""
+        del suffix_slice
         eval_batch_size = self.config.eval_batch_size
         batch_num = math.ceil(eval_full_ids.size(0) / eval_batch_size)
-        losses = []
+        metrics = {}
         with torch.no_grad():
             for i in range(batch_num):
                 batch_full_ids = eval_full_ids[i*eval_batch_size: (i+1)*eval_batch_size, :]
                 batch_eval_logits = eval_logits[i*eval_batch_size: (i+1)*eval_batch_size, :, :]
+                attention_mask = torch.ones_like(batch_full_ids)
+                target_mask = torch.zeros_like(batch_full_ids, dtype=torch.bool)
+                target_mask[:, target_slice] = True
+                batch_metrics = self._budget_margin_metrics(
+                    batch_eval_logits, batch_full_ids, attention_mask, target_mask)
                 target_logits = batch_eval_logits[:, target_slice, :]
-                labels = torch.zeros(target_logits.shape[:2], device=target_logits.device,
-                                     dtype=torch.long)
-                batch_loss = F.cross_entropy(
-                    target_logits.transpose(1, 2), labels, reduction="none"
-                ).mean(dim=1)
-                losses.append(batch_loss.detach().cpu())
-        return torch.cat(losses, dim=0).numpy()  # [C]
+                labels = torch.zeros(target_logits.shape[:-1], dtype=torch.long,
+                                     device=target_logits.device)
+                cls_loss = self.loss_weight1 * F.cross_entropy(
+                    target_logits.reshape(-1, target_logits.size(-1)),
+                    labels.reshape(-1), reduction="none",
+                ).reshape(target_logits.size(0), -1).mean(dim=1)
+                batch_metrics["objective_loss"] = cls_loss
+                if self.target_loss_weight:
+                    batch_metrics["objective_loss"] = batch_metrics["objective_loss"] + (
+                        self.target_loss_weight * batch_metrics["target_keep_score"])
+                if self.margin_hinge_weight:
+                    batch_metrics["objective_loss"] = batch_metrics["objective_loss"] + (
+                        self.margin_hinge_weight * torch.relu(
+                            batch_metrics["worst_signed_margin"] + self.margin_delta))
+                for name, values in batch_metrics.items():
+                    metrics.setdefault(name, []).append(values.detach().cpu())
+        return {name: torch.cat(values, dim=0).numpy()
+                for name, values in metrics.items()}
+
+    def _per_candidate_cls_losses(self, eval_logits, eval_full_ids, suffix_slice, target_slice):
+        """Compatibility wrapper returning the per-candidate objective."""
+        return self._per_candidate_budget_metrics(
+            eval_logits, eval_full_ids, suffix_slice, target_slice)["objective_loss"]
 
     def evaluate_candidates(self, eval_logits, eval_full_ids, suffix_slice, target_slice):
         """
@@ -382,6 +552,10 @@ class AttackforLLMLingua2(object):
             topk=self.config.top_k,
             generator=self.gen,
         )
+        # Always score the incumbent alongside one-flip mutations.  Without
+        # this, resetting best_loss for a new run discards a warm start on the
+        # first step and can only move uphill before the search recovers.
+        candidates = torch.cat([suffix_ids.unsqueeze(0), candidates], dim=0)
 
         # The deployed suffix crosses an IDs -> text -> IDs boundary.  Reject
         # candidates that change at that boundary before they can become the
@@ -399,7 +573,9 @@ class AttackforLLMLingua2(object):
         eval_logits = eval_output.logits  # [C, T, num_labels]
 
         # Per-candidate cls loss
-        cls_losses = self._per_candidate_cls_losses(eval_logits, eval_full_ids, suffix_slice, target_slice)  # [C]
+        candidate_metrics = self._per_candidate_budget_metrics(
+            eval_logits, eval_full_ids, suffix_slice, target_slice)
+        cls_losses = candidate_metrics["objective_loss"]  # [C]
 
         # Combine with surrogate PPL if available
         if self.surrogate_model is not None:
@@ -412,10 +588,20 @@ class AttackforLLMLingua2(object):
 
         min_idx = int(np.argmin(total_losses))
         min_loss = float(total_losses[min_idx])
+        self.last_step_loss = min_loss
+        self.last_step_metrics = {
+            "objective_loss": float(cls_losses[min_idx]),
+            "target_keep_score": float(candidate_metrics["target_keep_score"][min_idx]),
+            "signed_margins": candidate_metrics["signed_margins"][min_idx].tolist(),
+            "compression_rates": list(self.compression_rates),
+            "worst_signed_margin": float(
+                candidate_metrics["worst_signed_margin"][min_idx]),
+        }
 
         if min_loss < self.best_loss:
             self.best_loss = min_loss
             self.best_candidates = candidates[min_idx].clone()
+            self.best_metrics = dict(self.last_step_metrics)
         if self.best_candidates is None:
             self.best_candidates = candidates[0].clone()
 

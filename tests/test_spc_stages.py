@@ -126,11 +126,44 @@ class SPCStagesTest(unittest.TestCase):
                 return [1, 2]
 
         attacker = Attacker()
-        candidates, steps = optimize_suffix_checkpoints(
+        candidates, steps, loss_history = optimize_suffix_checkpoints(
             attacker, "prompt", "sentence", "target", Tokenizer(), checkpoint_every=100)
         self.assertEqual(attacker.calls, 500)
         self.assertEqual(steps, 500)
+        self.assertEqual(len(loss_history), 500)
+        self.assertEqual(loss_history[0], {
+            "step": 1, "step_objective_loss": 0.5, "best_objective_loss": 0.5,
+            "step_loss": 0.5, "best_loss": 0.5, "loss": 0.5})
         self.assertEqual(len(candidates), 1)
+
+    def test_optimizer_records_signed_margin_metrics(self):
+        class Attacker:
+            last_step_loss = 0.4
+            last_step_metrics = {"objective_loss": 0.4}
+            best_metrics = {"objective_loss": 0.3, "target_keep_score": 0.2,
+                            "compression_rates": [0.7], "signed_margins": [0.05],
+                            "worst_signed_margin": 0.05}
+
+            def step(self, prompts, sentences, targets):
+                del prompts, sentences, targets
+                return 0.3, [1]
+
+        class Tokenizer:
+            def decode(self, ids, skip_special_tokens=True):
+                del ids, skip_special_tokens
+                return "x"
+
+            def encode(self, text, add_special_tokens=False):
+                del text, add_special_tokens
+                return [1]
+
+        candidates, _, history = optimize_suffix_checkpoints(
+            Attacker(), "prompt", "sentence", "target", Tokenizer(), max_steps=1)
+        self.assertEqual(history[0]["step_objective_loss"], 0.4)
+        self.assertEqual(history[0]["margin_0.7"], 0.05)
+        self.assertNotIn("margin_0.5", history[0])
+        self.assertEqual(history[0]["worst_signed_margin"], 0.05)
+        self.assertEqual(candidates[0]["target_keep_score"], 0.2)
 
     def test_optimizer_keeps_unique_stable_candidates_between_scheduled_checkpoints(self):
         class Attacker:
@@ -150,7 +183,7 @@ class SPCStagesTest(unittest.TestCase):
                 del add_special_tokens
                 return [int(value) for value in text.split()]
 
-        candidates, _ = optimize_suffix_checkpoints(
+        candidates, _, _ = optimize_suffix_checkpoints(
             Attacker(), "prompt", "sentence", "target", Tokenizer(),
             checkpoint_every=100,
         )

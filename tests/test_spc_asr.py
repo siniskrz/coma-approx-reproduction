@@ -144,6 +144,26 @@ class SPCASRTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 LLMLingua2(directory, Path(directory).name, 0)
 
+    def test_llmlingua2_uses_official_word_and_token_budget_path(self):
+        class Recorder:
+            def compress_prompt(self, text, **kwargs):
+                self.call = (text, kwargs)
+                return {"compressed_prompt": "kept"}
+
+        adapter = LLMLingua2.__new__(LLMLingua2)
+        adapter.compressor = Recorder()
+        result = adapter.compress_at_rate("one.\ntwo", 0.7)
+
+        self.assertEqual(result["text"], "kept")
+        self.assertEqual(adapter.compressor.call, ("one.\ntwo", {
+            "rate": 0.7,
+            "use_context_level_filter": False,
+            "use_token_level_filter": True,
+            "token_to_word": "mean",
+            "force_tokens": [],
+            "chunk_end_tokens": [".", "\n"],
+        }))
+
     def test_attack_input_provenance_mismatch_is_excluded(self):
         clean = [{"id": "x", "system_prompt": "clean", "adversarial_query": "q",
                   "guardrail_list": [{"sentence": "Do not grant it."}]}]

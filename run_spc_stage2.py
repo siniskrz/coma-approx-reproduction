@@ -23,7 +23,7 @@ def target_absent(text: str, target: str) -> bool:
 
 def run_stage2(rows, attacker, tokenizer, compress_at_rate, surrogate,
                *, initial_suffix: str, checkpoint_every: int = 25,
-               max_suffix_tokens: int = 32) -> list[dict]:
+               max_suffix_tokens: int = 32, max_steps: int = 500) -> list[dict]:
     """Run 500 iterative steps, then require removal at all three budgets."""
     initial_ids = suffix_token_ids(tokenizer, initial_suffix, max_suffix_tokens)
     if not initial_ids:
@@ -40,13 +40,29 @@ def run_stage2(rows, attacker, tokenizer, compress_at_rate, surrogate,
         prefix, query, target_sentence, target_text = stage_two_inputs(row)
         guardrails = row["stage1"]["surrogate_guardrails"]
         render = lambda suffix: public_attack_prompt(prefix, guardrails, query, suffix)
+        clean_trials = []
+        if getattr(attacker, "require_clean_target_retention", False):
+            for rate in (0.5, 0.6, 0.7):
+                compressed = compress_at_rate(render(""), rate)
+                text = compressed.get("text") if isinstance(compressed, dict) else None
+                if not isinstance(text, str):
+                    raise ValueError("Stage-II compressor returned no text")
+                clean_trials.append({"compression_rate": rate,
+                                     "target_retained": not target_absent(text, target_text)})
+            if not all(trial["target_retained"] for trial in clean_trials):
+                results.append({"id": str(row.get("sample_id", "")), "skip": True,
+                                "reason": "target is not retained by clean compression at every budget",
+                                "clean_budget_trials": clean_trials})
+                continue
         if hasattr(attacker, "best_loss"):
             attacker.best_loss = float("inf")
         if hasattr(attacker, "best_candidates"):
             attacker.best_candidates = None
-        candidates, steps_run = optimize_suffix_checkpoints(
+        if hasattr(attacker, "best_metrics"):
+            attacker.best_metrics = None
+        candidates, steps_run, loss_history = optimize_suffix_checkpoints(
             attacker, render(initial_suffix), target_sentence, target_text, tokenizer,
-            max_steps=500, checkpoint_every=checkpoint_every,
+            max_steps=max_steps, checkpoint_every=checkpoint_every,
             max_suffix_tokens=max_suffix_tokens, render_prompt=render,
         )
 
@@ -72,8 +88,16 @@ def run_stage2(rows, attacker, tokenizer, compress_at_rate, surrogate,
                             "top_k": getattr(getattr(attacker, "config", None), "top_k", None),
                             "eval_batch_size": getattr(getattr(attacker, "config", None),
                                                        "eval_batch_size", None),
+                            "target_loss_weight": getattr(attacker, "target_loss_weight", 0.0),
+                            "margin_hinge_weight": getattr(attacker, "margin_hinge_weight", 0.0),
+                            "margin_delta": getattr(attacker, "margin_delta", 0.0),
+                            "coordinate_width": getattr(attacker, "coordinate_width", 1),
+                            "optimization_rate": getattr(attacker, "compression_rates", (0.5, 0.6, 0.7)),
                             "seed": getattr(getattr(attacker, "config", None), "seed", None)},
         )
+        artifact["stage2"]["loss_history"] = loss_history
+        if not artifact["stage2"]["validated"] and loss_history:
+            artifact["stage2"]["best_loss"] = loss_history[-1]["best_objective_loss"]
         leaked = FORBIDDEN_ARTIFACT_FIELDS.intersection(artifact)
         if leaked:
             raise AssertionError(f"Stage-II artifact leaked trusted fields: {sorted(leaked)}")
@@ -99,11 +123,24 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--max-items", type=int,
                         help="optional smoke-test limit")
+    parser.add_argument("--max-steps", type=int, default=500,
+                        help="experimental step limit; default is paper-aligned 500")
+    parser.add_argument("--target-loss-weight", type=float, default=0.0)
+    parser.add_argument("--margin-hinge-weight", type=float, default=0.0)
+    parser.add_argument("--margin-delta", type=float, default=0.0)
+    parser.add_argument("--optimization-rate", type=float, choices=(0.5, 0.6, 0.7),
+                        help="budget used by the differentiable optimizer; hard validation remains all three rates")
+    parser.add_argument("--coordinate-width", type=int, choices=(1, 2), default=1,
+                        help="mutated suffix coordinates per proposal")
+    parser.add_argument("--require-clean-target-retention", action="store_true",
+                        help="skip samples whose clean compression drops the target")
     args = parser.parse_args()
     if not 1 <= args.max_suffix_tokens <= 32:
         parser.error("--max-suffix-tokens must be between 1 and 32")
     if args.max_items is not None and args.max_items < 1:
         parser.error("--max-items must be at least 1")
+    if not 1 <= args.max_steps <= 500:
+        parser.error("--max-steps must be between 1 and 500")
 
     snapshot = Path(args.surrogate_snapshot).resolve()
     if not snapshot.is_dir() or snapshot.name != args.surrogate_revision:
@@ -121,19 +158,22 @@ def main() -> None:
     config = AttackConfig(model_name=str(snapshot), suffix_length=len(initial_ids),
                           num_steps=500, sample_batch_size=args.sample_batch_size,
                           top_k=args.top_k, eval_batch_size=args.eval_batch_size,
-                          seed=args.seed)
+                          seed=args.seed, target_loss_weight=args.target_loss_weight,
+                          margin_hinge_weight=args.margin_hinge_weight,
+                          margin_delta=args.margin_delta,
+                          coordinate_width=args.coordinate_width,
+                          require_clean_target_retention=args.require_clean_target_retention)
     validator = LLMLingua2(str(snapshot), args.surrogate_revision, 0.6, actual_hash)
     # Reuse the validator's token-classification model and tokenizer. Loading a
     # second identical checkpoint can otherwise exhaust an 8 GB toy-run GPU.
     attacker = AttackforLLMLingua2(config=config, model=validator.compressor.model,
-                                   tokenizer=validator.compressor.tokenizer)
+                                   tokenizer=validator.compressor.tokenizer,
+                                   rank_tokenizer=validator.compressor.oai_tokenizer,
+                                   compression_rates=((args.optimization_rate,)
+                                                      if args.optimization_rate else (0.5, 0.6, 0.7)))
 
     def compress_at_rate(text: str, rate: float) -> dict:
-        raw = validator.compressor.compress_prompt(text, rate=rate)
-        compressed = raw.get("compressed_prompt") if isinstance(raw, dict) else None
-        if not isinstance(compressed, str):
-            raise ValueError("LLMLingua2 returned no compressed_prompt")
-        return {"text": compressed, "raw": raw}
+        return validator.compress_at_rate(text, rate)
 
     surrogate = {"model": args.surrogate_model, "revision": args.surrogate_revision,
                  "weight_sha256": actual_hash, "weight_files": weight_files,
@@ -142,7 +182,8 @@ def main() -> None:
                            compress_at_rate, surrogate,
                            initial_suffix=args.initial_suffix,
                            checkpoint_every=args.checkpoint_every,
-                           max_suffix_tokens=args.max_suffix_tokens)
+                           max_suffix_tokens=args.max_suffix_tokens,
+                           max_steps=args.max_steps)
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text("".join(json.dumps(row, ensure_ascii=False, default=str) + "\n"

@@ -175,6 +175,33 @@ def public_attack_prompt(prefix: str, guardrails: Iterable[str], query: str, suf
             "\n</PUBLIC_SURROGATE>\n<USER>\n" + query.rstrip() + " " + suffix.strip())
 
 
+def _optimizer_metrics(value) -> dict:
+    """Convert the attacker's tensor metrics to JSON-safe scalars."""
+    if not isinstance(value, dict):
+        return {}
+
+    def values(item):
+        if hasattr(item, "detach"):
+            item = item.detach().cpu().reshape(-1).tolist()
+        elif not isinstance(item, (list, tuple)):
+            item = [item]
+        return [float(number) for number in item]
+
+    result = {}
+    for key in ("objective_loss", "target_keep_score", "worst_signed_margin"):
+        if key in value:
+            result[key] = values(value[key])[0]
+    if "signed_margins" in value:
+        for rate, margin in zip(value.get("compression_rates", RATES),
+                                values(value["signed_margins"])):
+            result[f"margin_{rate}"] = margin
+    for rate in RATES:
+        key = f"margin_{rate}"
+        if key in value:
+            result[key] = values(value[key])[0]
+    return result
+
+
 def optimize_suffix_checkpoints(
     attacker,
     prompt: str,
@@ -186,16 +213,27 @@ def optimize_suffix_checkpoints(
     checkpoint_every: int = 25,
     max_suffix_tokens: int = 32,
     render_prompt: Callable[[str], str] | None = None,
-) -> tuple[list[dict], int]:
-    """Run the existing optimizer and retain stable, bounded checkpoints."""
-    if max_steps != 500:
-        raise ValueError("paper-aligned Stage-II max_steps must be 500")
+) -> tuple[list[dict], int, list[dict]]:
+    """Run the optimizer and retain candidates plus every step's loss."""
+    if not 1 <= max_steps <= 500:
+        raise ValueError("Stage-II max_steps must be between 1 and 500")
     if checkpoint_every < 1 or not 1 <= max_suffix_tokens <= 32:
         raise ValueError("invalid Stage-II checkpoint or suffix-token budget")
-    candidates, seen = [], set()
+    candidates, seen, loss_history = [], set(), []
     current_prompt = prompt
     for step in range(1, max_steps + 1):
         loss, raw_ids = attacker.step([current_prompt], [target_sentence], [target_text])
+        step_loss = float(getattr(attacker, "last_step_loss", loss))
+        step_metrics = _optimizer_metrics(getattr(attacker, "last_step_metrics", None))
+        best_metrics = _optimizer_metrics(getattr(attacker, "best_metrics", None))
+        best_objective = best_metrics.get("objective_loss", float(loss))
+        history = {"step": step,
+                   "step_objective_loss": step_metrics.get("objective_loss", step_loss),
+                   "best_objective_loss": best_objective,
+                   "step_loss": step_loss, "best_loss": float(loss), "loss": float(loss)}
+        history.update({key: value for key, value in best_metrics.items()
+                        if key != "objective_loss"})
+        loss_history.append(history)
         ids = [int(value) for value in raw_ids]
         suffix = tokenizer.decode(ids, skip_special_tokens=True).strip()
         actual = tokenizer.encode(suffix, add_special_tokens=False) if suffix else []
@@ -211,10 +249,12 @@ def optimize_suffix_checkpoints(
             "best_loss": float(loss),
             "suffix_roundtrip_stable": stable,
         }
+        checkpoint.update({key: value for key, value in best_metrics.items()
+                           if key != "objective_loss"})
         if stable and tuple(ids) not in seen:
             candidates.append(checkpoint)
             seen.add(tuple(ids))
-    return candidates, max_steps
+    return candidates, max_steps, loss_history
 
 
 def make_stage_two_artifact(
@@ -233,7 +273,7 @@ def make_stage_two_artifact(
     selected = result["selected"]
     stage2 = {
         "status": "COMPLETE" if selected else "NO_VALIDATED_SUFFIX",
-        "max_steps": 500,
+        "max_steps": steps_run,
         "steps_run": steps_run,
         "best_loss": selected.get("best_loss") if selected else None,
         "budget_trials": selected.get("budget_trials", []) if selected else [],
