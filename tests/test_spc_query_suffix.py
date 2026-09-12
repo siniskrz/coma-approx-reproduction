@@ -74,9 +74,10 @@ class QuerySuffixBoundaryTests(unittest.TestCase):
     def test_blind_input_contains_only_public_surrogate_and_provenance(self):
         blind = prepare_blind_inputs([self.row], self.public_pool)[0]
         self.assertEqual(set(blind), {
-            "sample_id", "source_hash", "original_query", "surrogate_query", "surrogate_prefix",
+            "sample_id", "public_surrogate_id", "source_hash", "original_query", "surrogate_query", "surrogate_prefix",
             "surrogate_guardrails", "critical_candidates",
         })
+        self.assertTrue(blind["public_surrogate_id"])
         serialized = json.dumps(blind)
         self.assertNotIn(self.row["system_prompt"], serialized)
         self.assertNotIn(self.row["context"], serialized)

@@ -25,7 +25,8 @@ class Judge:
 
 class Stage1RunnerTest(unittest.TestCase):
     def test_blind_runner_observes_real_flip_without_trusted_fields(self):
-        row = {"sample_id": "toy", "source_hash": "ab", "original_query": "May it enter?",
+        row = {"sample_id": "toy", "public_surrogate_id": "public-1",
+               "source_hash": "ab" * 32, "original_query": "May it enter?",
                "surrogate_query": "May the public token enter?",
                "surrogate_prefix": "A public toy keeper follows this rule.",
                "surrogate_guardrails": ["must not approve entry"],
@@ -39,11 +40,12 @@ class Stage1RunnerTest(unittest.TestCase):
         self.assertEqual(result["stage1"]["clean_joint_prompt"].count("must not approve entry"), 1)
 
     def test_private_system_is_rejected(self):
-        with self.assertRaisesRegex(ValueError, "leaks trusted"):
+        with self.assertRaisesRegex(ValueError, "fields differ"):
             validate_blind_row({"system_prompt": "private"})
 
     def test_guardrail_not_just_prefix_is_in_stage_one_prompt(self):
-        row = {"sample_id": "toy", "source_hash": "ab", "original_query": "May it enter?",
+        row = {"sample_id": "toy", "public_surrogate_id": "public-1",
+               "source_hash": "ab" * 32, "original_query": "May it enter?",
                "surrogate_query": "May the public token enter?",
                "surrogate_prefix": "Public toy keeper rules:",
                "surrogate_guardrails": ["must not approve entry"],

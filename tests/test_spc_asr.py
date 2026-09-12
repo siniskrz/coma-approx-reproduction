@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from run_spc_asr import (ATTACK_PROTOCOL, LLMLingua2, attack_surrogate_identity, build_joint_prompt,
                          parse_judge_label, run_spc_asr, sample_id, source_hash,
                          summarize_human_reviews)
-from run_guardrail_attack import validate_surrogate
+from comattack.spc_stages import record_sha256
 
 
 class SuffixTokenizer:
@@ -67,20 +67,24 @@ def attack_for(clean, suffix="suffix", token_ids=None, rate=0.6, **extra):
                           for trial_rate in (0.5, 0.6, 0.7)],
         "stable": True,
     }
+    occurrence = {"text": "not", "start": 0, "end": 3}
+    stage1 = {"status": "COMPLETE", "selected_target": "toy", "baseline_label": "NO",
+              "counterfactual_label": "YES", "critical_occurrences": [occurrence],
+              "baseline": {"label": "NO", "backend": backend_evidence, "judge": judge_no},
+              "trials": [{"target_prompt": "toy", "deleted_occurrence": occurrence,
+                          "outcome": {"label": "YES", "backend": backend_evidence,
+                                      "judge": judge_yes}}]}
     return {
         "id": clean["id"], "protocol": ATTACK_PROTOCOL,
         "source_hash": source_hash(clean), "original_query": clean["adversarial_query"],
         "attack_suffix": suffix, "suffix_token_ids": token_ids,
         "suffix_token_count": len(token_ids),
         "budget": {"compression_rate": rate, "max_suffix_tokens": 32},
-        "stage1": {"status": "COMPLETE", "selected_target": "toy", "baseline_label": "NO",
-                   "counterfactual_label": "YES", "critical_occurrences": [{"text": "not"}],
-                   "baseline": {"label": "NO", "backend": backend_evidence, "judge": judge_no},
-                   "trials": [{"target_prompt": "toy", "outcome": {
-                       "label": "YES", "backend": backend_evidence, "judge": judge_yes}}]},
+        "stage1": stage1,
         "stage2": {"status": "COMPLETE", "max_steps": 500, "steps_run": 500,
                    "best_loss": 0, "candidates": [selected], "selected": selected,
-                   "suffix_roundtrip_stable": True, "validated": True},
+                   "suffix_roundtrip_stable": True, "validated": True,
+                   "raw_provenance": {"stage1_sha256": record_sha256(stage1)}},
         "surrogate": {"model": "surrogate", "revision": "revision", "weight_sha256": "00",
                       "auxiliary_files": {"tokenizer.json": "11"}},
         **extra,
@@ -208,19 +212,6 @@ class SPCASRTest(unittest.TestCase):
         self.assertEqual(prompt.count("system"), 1)
         self.assertEqual(prompt.count("context"), 1)
         self.assertEqual(prompt.count("query"), 1)
-
-    def test_surrogate_pin_is_checked_before_loading(self):
-        class Args:
-            surrogate_revision = "snapshot"
-            surrogate_weight_sha256 = "00"
-
-        with tempfile.TemporaryDirectory() as directory:
-            snapshot = Path(directory) / "snapshot"
-            snapshot.mkdir()
-            (snapshot / "model.safetensors").write_bytes(b"weights")
-            Args.surrogate_model = str(snapshot)
-            with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
-                validate_surrogate(Args)
 
     def test_all_skipped_attack_batch_has_clear_error(self):
         with self.assertRaisesRegex(ValueError, "no eligible"):

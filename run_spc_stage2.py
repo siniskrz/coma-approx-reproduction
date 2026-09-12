@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from pathlib import Path
 
 from comattack.spc_query_suffix import FORBIDDEN_ARTIFACT_FIELDS, suffix_token_ids
@@ -64,7 +65,14 @@ def run_stage2(rows, attacker, tokenizer, compress_at_rate, surrogate,
             raw_provenance={"optimizer": type(attacker).__name__,
                             "initial_suffix_token_ids": initial_ids,
                             "checkpoint_every": checkpoint_every,
-                            "budgets": [0.5, 0.6, 0.7]},
+                            "budgets": [0.5, 0.6, 0.7],
+                            "python_version": sys.version,
+                            "sample_batch_size": getattr(getattr(attacker, "config", None),
+                                                         "sample_batch_size", None),
+                            "top_k": getattr(getattr(attacker, "config", None), "top_k", None),
+                            "eval_batch_size": getattr(getattr(attacker, "config", None),
+                                                       "eval_batch_size", None),
+                            "seed": getattr(getattr(attacker, "config", None), "seed", None)},
         )
         leaked = FORBIDDEN_ARTIFACT_FIELDS.intersection(artifact)
         if leaked:

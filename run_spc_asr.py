@@ -275,6 +275,11 @@ def _valid_attack_evidence(stage1: object, stage2: object) -> bool:
     """
     if not isinstance(stage1, dict) or not isinstance(stage2, dict):
         return False
+    from comattack.spc_stages import record_sha256
+    provenance = stage2.get("raw_provenance")
+    if (not isinstance(provenance, dict) or
+            provenance.get("stage1_sha256") != record_sha256(stage1)):
+        return False
     trials = stage1.get("trials")
     successful = [trial for trial in trials or [] if isinstance(trial, dict)
                   and isinstance(trial.get("outcome"), dict)
@@ -285,8 +290,10 @@ def _valid_attack_evidence(stage1: object, stage2: object) -> bool:
             stage1.get("baseline_label") != "NO" or
             stage1.get("counterfactual_label") != "YES" or
             not isinstance(baseline, dict) or baseline.get("label") != "NO" or
-            not successful or not isinstance(occurrences, list) or not occurrences or
+            len(successful) != 1 or not isinstance(occurrences, list) or len(occurrences) != 1 or
             stage1.get("selected_target") != successful[0].get("target_prompt")):
+        return False
+    if occurrences[0] != successful[0].get("deleted_occurrence"):
         return False
     for evidence in (baseline, successful[0]["outcome"]):
         if (not isinstance(evidence.get("backend"), dict) or
@@ -378,7 +385,7 @@ def run_spc_asr(clean_rows: list[dict], attack_rows: list[dict], compressor, bac
         source, attack = clean[key], attacked[key]
         if attack.get("skip") is True:
             records.append({"sample_id": key, "status": "SKIPPED_ATTACK",
-                            "error": "run_guardrail_attack marked this sample skipped", "conditions": {}})
+                            "error": "attack artifact marked this sample skipped", "conditions": {}})
             continue
         system = source.get("system_prompt")
         query = _query_text(source)

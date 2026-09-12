@@ -38,16 +38,16 @@ The framework implements a two-stage attack:
 conda create -n coma python=3.10 -y && conda activate coma
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 cd artifact/
-pip install -e ".[all]"
+pip install -r requirements-spc.txt
 ```
 
-## Reproducing Paper Results
+## Experiment Launchers
 
 Each RQ has a dedicated reproduction script:
 
 | RQ | Script | Description |
 |----|--------|-------------|
-| RQ1 | `scripts/reproduce_rq1.sh` | Effectiveness launcher for ATS/QA; legacy SPC is disabled
+| RQ1 | `scripts/reproduce_rq1.sh` | Effectiveness launcher for ATS/QA
 | RQ2 | `scripts/reproduce_rq2.sh` | Generalization: budget sweep + backend LLMs
 | RQ3 | `scripts/reproduce_rq3.sh` | Surrogate mismatch + token retention
 | RQ4 | `scripts/reproduce_rq4.sh` | Case studies: VSCode Cline, LangChain+Ollama
@@ -63,6 +63,12 @@ query share one compression budget. The included dataset contains 20 low-risk,
 fictional permission examples, so these results are a development experiment,
 not the paper's reported ASR or a strict reproduction.
 
+The bundled V2 pool intentionally contains one public surrogate rule. Stage I
+therefore reports `unique_public_surrogates: 1`; its 20 rows are repeated trials
+bound to private sample provenance, not 20 independent attack targets. Add
+distinct, licensed public surrogate rules before interpreting cross-target
+generalization.
+
 Install the limited SPC dependencies, pin every local model snapshot and hash,
 and provide API keys only through the named environment variables:
 
@@ -70,8 +76,8 @@ and provide API keys only through the named environment variables:
 pip install -r requirements-spc.txt
 
 python prepare_spc_blind_inputs.py \
-  --private-data data/toy_spc_permissions.json \
-  --public-pool data/public_toy_surrogate_pool.json \
+  --private-data data/toy_spc_permissions_v2.json \
+  --public-pool data/public_toy_surrogate_pool_v2.json \
   --output results/spc/blind.jsonl
 
 python run_spc_stage1.py \
@@ -100,7 +106,7 @@ python run_spc_stage2.py \
   --eval-batch-size 128 --checkpoint-every 25
 
 python run_spc_asr.py \
-  --data data/toy_spc_permissions.json \
+  --data data/toy_spc_permissions_v2.json \
   --attack-results results/spc/attacks.jsonl \
   --output results/spc/asr.json \
   --compressor llmlingua2 \
@@ -121,17 +127,12 @@ python run_spc_asr.py \
 Stage II is fixed to 500 optimization steps, a suffix of at most 32
 tokens, and validation at compression rates 0.5, 0.6, and 0.7. `run_spc_asr.py`
 rejects incomplete Stage-I evidence, unvalidated Stage-II candidates, modified
-trusted fields, provenance mismatches, and suffixes over the limit. It stores
+trusted fields, Stage-I hash mismatches, provenance mismatches, and suffixes over
+the limit. Stage-I candidate deletions are evaluated independently so a later
+candidate cannot inherit an earlier deletion and receive false causal credit. It stores
 raw backend/Judge evidence, maps non-exact labels to `UNKNOWN`, and reports the
 paired A/B/C/D design plus the baseline-stable subset (`A=B=C=NO`). Use
 `--max-items 2` only as a paid-API smoke test.
-
-The retired `run_guardrail_attack.py`, `scripts/run_guardrail_attack.sh`, the
-SPC branch of `scripts/reproduce_rq1.sh`, and SPC in
-`run_surrogate_mismatch.py` fail closed because those paths edited trusted
-system-prompt text. The engineering boundary generator
-`run_spc_query_suffix.py` does not run Stage I/II and its artifacts are not
-eligible for ASR reporting.
 
 Run the offline protocol checks with:
 
@@ -180,10 +181,9 @@ artifact/
   run_spc_stage1.py         # Behavior-based target selection
   run_spc_stage2.py         # Query-suffix optimization and multi-budget validation
   run_spc_asr.py            # Paired shared-budget evaluation
-  run_guardrail_attack.py   # Disabled legacy direct-system SPC path
   run_qa_attack.py          # Entry point: QA task
   run_pref_attack.py        # Entry point: ATS task
-  run_surrogate_mismatch.py # Surrogate mismatch (legacy SPC path disabled)
+  run_surrogate_mismatch.py # ATS/QA surrogate mismatch
   run_pref_attack.sh        # Batch launcher: ATS (all compressors)
   run_qa_attack.sh          # Batch launcher: QA (all compressors)
   run_surrogate_mismatch.sh  # Batch launcher: surrogate grid

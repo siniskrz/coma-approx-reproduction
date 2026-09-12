@@ -11,6 +11,12 @@ from comattack.spc_stages import (
 
 
 class SPCStagesTest(unittest.TestCase):
+    @staticmethod
+    def evidence(label):
+        return {"label": label,
+                "backend": {"request": {}, "response": {}, "content": "answer", "error": None},
+                "judge": {"request": {}, "response": {}, "content": label, "error": None}}
+
     def test_suffix_bounds_exclude_bos_eos_and_padding(self):
         self.assertEqual(content_suffix_bounds([1, 0, 0, 0, 1, 1], 2), (2, 4))
 
@@ -41,6 +47,20 @@ class SPCStagesTest(unittest.TestCase):
         self.assertEqual(result["status"], "NO_FEASIBLE_TARGET")
         self.assertIsNone(result["selected_target"])
 
+    def test_stage_one_candidates_are_independent_not_cumulative(self):
+        seen = []
+
+        def simulate(prompt):
+            seen.append(prompt)
+            return {"label": "YES" if "alpha" not in prompt and "beta" not in prompt else "NO"}
+
+        result = select_dropout_target(
+            "rule alpha beta", ["alpha", "beta"], simulate,
+            surrogate_guardrails=["rule alpha beta"],
+        )
+        self.assertEqual(result["status"], "NO_FEASIBLE_TARGET")
+        self.assertEqual(seen, ["rule alpha beta", "rule  beta", "rule alpha "])
+
     def test_stage_one_rejects_missing_surrogate_guardrails(self):
         with self.assertRaisesRegex(ValueError, "surrogate_guardrails"):
             select_dropout_target("Public toy text.", ["toy"],
@@ -59,11 +79,14 @@ class SPCStagesTest(unittest.TestCase):
             validate_budget_candidates(candidates, lambda suffix, rate: {}, rates=(0.6,))
 
     def test_stage_two_emits_strict_selected_candidate_and_three_raw_trials(self):
+        occurrence = {"text": "not", "start": 18, "end": 21}
         stage1 = {
             "status": "COMPLETE", "baseline_label": "NO", "counterfactual_label": "YES",
-            "selected_target": "target", "critical_occurrences": [{"text": "not"}],
+            "selected_target": "target", "critical_occurrences": [occurrence],
             "surrogate_guardrails": ["A public token is not admitted."],
-            "baseline": {"label": "NO"}, "trials": [{"outcome": {"label": "YES"}}],
+            "baseline": self.evidence("NO"),
+            "trials": [{"target_prompt": "target", "deleted_occurrence": occurrence,
+                        "outcome": self.evidence("YES")}],
         }
         row = {"sample_id": "toy-perm-01", "source_hash": "ab" * 32,
                "original_query": "May the token enter?", "surrogate_query": "May the public token enter?",

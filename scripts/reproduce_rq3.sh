@@ -11,9 +11,6 @@ while [[ $# -gt 0 ]]; do
         --part) PART="$2"; shift 2 ;;
         --parallel) PARALLEL="$2"; shift 2 ;;
         --gpus) GPUS="$2"; shift 2 ;;
-        --judge)
-            echo "ERROR: legacy SPC surrogate-mismatch runs are disabled; use the dedicated query-suffix pipeline." >&2
-            exit 2 ;;
         --dry-run) DRY_RUN=true; shift ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
@@ -29,7 +26,6 @@ if [[ "$PART" == "all" || "$PART" == "a" ]]; then
         --output results/rq3_mismatch
         --data-pref data/ats/pref_manipulation_filtered_llmlingua1_max900.json
         --data-qa data/qa/squad_qa_filtered_llmlingua1_max900.json
-        --data-spc data/system_prompt/leaked_system_prompt_guardrails.json
     )
 
     if [[ -n "$GPUS" ]]; then
@@ -68,8 +64,7 @@ if [[ "$PART" == "all" || "$PART" == "b" ]]; then
     for COMP in llmlingua1 llmlingua2; do
         for TASK_CFG in \
             "qa:results/rq1/qa/extractive_${COMP}/qa_extractive_results.jsonl" \
-            "prom:results/rq1/pref/extractive_${COMP}/pref_extractive_results.jsonl" \
-            "spc:results/rq1/spc/extractive_${COMP}/guardrail_extractive_results.jsonl"; do
+            "prom:results/rq1/pref/extractive_${COMP}/pref_extractive_results.jsonl"; do
 
             IFS=: read -r TASK RESULTS_FILE <<< "$TASK_CFG"
 

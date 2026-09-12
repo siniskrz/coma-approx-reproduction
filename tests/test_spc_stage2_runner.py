@@ -25,6 +25,19 @@ class Attacker:
 
 
 class Stage2RunnerTest(unittest.TestCase):
+    @staticmethod
+    def complete_stage1():
+        backend = {"request": {}, "response": {}, "content": "answer", "error": None}
+        no = {"request": {}, "response": {}, "content": "NO", "error": None}
+        yes = {"request": {}, "response": {}, "content": "YES", "error": None}
+        occurrence = {"text": "not", "start": 5, "end": 8}
+        return {"status": "COMPLETE", "surrogate_guardrails": ["must not enter"],
+                "critical_occurrences": [occurrence], "selected_target": "must enter",
+                "baseline_label": "NO", "counterfactual_label": "YES",
+                "baseline": {"label": "NO", "backend": backend, "judge": no},
+                "trials": [{"target_prompt": "must enter", "deleted_occurrence": occurrence,
+                            "outcome": {"label": "YES", "backend": backend, "judge": yes}}]}
+
     def test_llmlingua2_filters_unstable_text_roundtrips_before_scoring(self):
         class RoundtripTokenizer:
             def decode(self, ids, skip_special_tokens=True):
@@ -45,9 +58,7 @@ class Stage2RunnerTest(unittest.TestCase):
         row = {"sample_id": "toy", "source_hash": "a" * 64,
                "original_query": "May it enter?", "surrogate_query": "May the public token enter?",
                "surrogate_prefix": "Public rules:",
-               "stage1": {"status": "COMPLETE", "surrogate_guardrails": ["must not enter"],
-                          "critical_occurrences": [{"text": "not"}],
-                          "baseline_label": "NO", "counterfactual_label": "YES"}}
+               "stage1": self.complete_stage1()}
         attacker = Attacker()
         calls = []
 

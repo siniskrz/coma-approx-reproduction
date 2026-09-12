@@ -28,6 +28,7 @@ FORBIDDEN_ARTIFACT_FIELDS = {
 }
 BLIND_FIELDS = {
     "sample_id",
+    "public_surrogate_id",
     "source_hash",
     "original_query",
     "surrogate_query",
@@ -100,8 +101,13 @@ def prepare_blind_inputs(private_rows: list[dict], public_pool: list[dict]) -> l
     blind = []
     for index, row in enumerate(private_rows):
         public = public_pool[index % len(public_pool)]
+        public_id = public.get("pool_id")
+        if not isinstance(public_id, str) or not public_id.strip():
+            public_id = hashlib.sha256(json.dumps(public, ensure_ascii=False, sort_keys=True,
+                                                  separators=(",", ":")).encode("utf-8")).hexdigest()
         candidate = {
             "sample_id": str(row.get("sample_id", row.get("id", ""))),
+            "public_surrogate_id": public_id,
             "source_hash": canonical_source_hash(row),
             "original_query": _query(row),
             "surrogate_query": public.get("surrogate_query"),
@@ -121,7 +127,8 @@ def validate_blind_row(row: dict) -> None:
     missing = BLIND_FIELDS - set(row)
     if extras or missing:
         raise ValueError(f"blind row fields differ: missing={sorted(missing)}, extra={sorted(extras)}")
-    if (not row["sample_id"] or
+    if (not row["sample_id"] or not isinstance(row["public_surrogate_id"], str) or
+            not row["public_surrogate_id"].strip() or
             any(not isinstance(row[key], str) or not row[key].strip()
                 for key in ("original_query", "surrogate_query"))):
         raise ValueError("blind row requires sample_id, original_query, and surrogate_query")

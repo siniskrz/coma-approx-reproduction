@@ -13,11 +13,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$TASK_FILTER" in
-    ""|spc)
-        echo "ERROR: the legacy RQ1 SPC launcher is disabled because it edited the trusted system prompt." >&2
-        echo "Choose --task ats or --task qa here; use the dedicated query-suffix pipeline for SPC." >&2
-        exit 2 ;;
-    ats|pref|qa) ;;
+    ""|ats|pref|qa) ;;
     *) echo "ERROR: unknown task: $TASK_FILTER" >&2; exit 1 ;;
 esac
 
@@ -110,5 +106,5 @@ if [[ -z "$TASK_FILTER" || "$TASK_FILTER" == "qa" ]]; then
 fi
 
 echo ""
-echo "===== Requested non-SPC RQ1 task complete ====="
+echo "===== Requested RQ1 task complete ====="
 echo "Results saved under results/rq1/"

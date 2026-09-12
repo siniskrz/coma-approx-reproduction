@@ -44,20 +44,8 @@ ABSTRACTIVE_HF_NAMES = {
     "gemma-3-4b": "google/gemma-3-4b-it",
 }
 
-ALL_TASKS = ["prom", "deg", "qa", "spc"]
+ALL_TASKS = ["prom", "deg", "qa"]
 SAMPLE_SIZE = 100
-
-LEGACY_SPC_ERROR = (
-    "SPC is disabled in run_surrogate_mismatch.py because its legacy path "
-    "modifies trusted system-prompt content. Use the dedicated query-suffix "
-    "pipeline: prepare_spc_blind_inputs.py, run_spc_stage1.py, "
-    "run_spc_stage2.py, then run_spc_asr.py."
-)
-
-
-def reject_legacy_spc_task(task):
-    if task == "spc":
-        raise ValueError(LEGACY_SPC_ERROR)
 
 
 # ---- data loading and target generation ---------------------------------
@@ -78,9 +66,6 @@ def generate_targets(dataset, task):
     if task == "qa":
         from run_qa_attack import compute_qa_target
         return [{**e, **compute_qa_target(e)} for e in dataset]
-    if task == "spc":
-        from run_guardrail_attack import compute_guardrail_target
-        return [{**e, **compute_guardrail_target(e)} for e in dataset]
     raise ValueError(f"Unknown task: {task}")
 
 
@@ -103,7 +88,7 @@ def run_attack_extractive_ppl(dataset, task, surrogate_model, args):
         seed=args.seed,
     )
     attacker = ContextEditAttackLLMLingua1(config=config)
-    atk_task = {"prom": "pref", "deg": "pref", "qa": "qa", "spc": "spc"}[task]
+    atk_task = {"prom": "pref", "deg": "pref", "qa": "qa"}[task]
     return run_context_edit_attack(
         attacker=attacker, dataset=dataset, task=atk_task,
         edit_radius=args.edit_radius, num_steps=args.num_steps,
@@ -127,7 +112,7 @@ def run_attack_extractive_cls(dataset, task, surrogate_model, args):
         seed=args.seed,
     )
     attacker = ContextEditAttackLLMLingua2(config=config)
-    atk_task = {"prom": "pref", "deg": "pref", "qa": "qa", "spc": "spc"}[task]
+    atk_task = {"prom": "pref", "deg": "pref", "qa": "qa"}[task]
     return run_context_edit_attack(
         attacker=attacker, dataset=dataset, task=atk_task,
         edit_radius=args.edit_radius, num_steps=args.num_steps,
@@ -180,11 +165,9 @@ def run_attack_abstractive(dataset, task, surrogate_model, args):
             attacked = attacker.tokenizer.decode(
                 r["best_suffix_ids"], skip_special_tokens=True
             )
-        # use task-appropriate field name for attacked text
-        atk_field = "attacked_prompt" if task == "spc" else "attacked_context"
         results.append({
             **entry,
-            atk_field: attacked,
+            "attacked_context": attacked,
             "best_loss": r["best_loss"],
             "converged": r["converged"],
         })
@@ -196,8 +179,6 @@ def _get_abstractive_io(entry, task):
         p, t = entry.get("original_context", ""), entry.get("target_context", "")
     elif task == "qa":
         p, t = entry.get("context", ""), entry.get("target_context", "")
-    elif task == "spc":
-        p, t = entry.get("system_prompt", ""), entry.get("target_prompt", "")
     else:
         return None, None
     return (p, t) if p and t else (None, None)
@@ -208,10 +189,10 @@ def _get_abstractive_io(entry, task):
 def get_attacked_texts(results, task):
     texts = []
     for r in results:
-        t = r.get("attacked_context") or r.get("attacked_prompt")
+        t = r.get("attacked_context")
         if t is None:
             fallback = {"prom": "original_context", "deg": "original_context",
-                        "qa": "context", "spc": "system_prompt"}
+                        "qa": "context"}
             t = r.get(fallback.get(task, ""), "")
         texts.append(t)
     return texts
@@ -219,7 +200,6 @@ def get_attacked_texts(results, task):
 
 def run_single_config(args):
     task = args.task
-    reject_legacy_spc_task(task)
     target = args.target_compressor
     surrogate = args.surrogate_model
 
@@ -245,15 +225,13 @@ def run_single_config(args):
     )
     compressor = make_compressor(target)
     backend = make_backend_llm(args.backend_llm, provider=args.llm_provider)
-    judge = (make_backend_llm(args.judge_llm, provider=args.llm_provider)
-             if task == "spc" else None)
     attacked_texts = get_attacked_texts(results, task)
 
     eval_result = evaluate_dataset(
         dataset=dataset, attacked_texts=attacked_texts,
         compressor=compressor, backend_llm=backend,
         task=task, compression_rate=args.compression_rate,
-        judge_llm=judge,
+        judge_llm=None,
     )
     asr = eval_result["asr"]
     log.info("ASR = %.4f  (%d / %d)", asr,
@@ -276,7 +254,6 @@ def run_single_config(args):
         "unknown": eval_result["unknown"],
         "compression_rate": args.compression_rate,
         "backend_llm": args.backend_llm,
-        "judge_llm": args.judge_llm if task == "spc" else None,
         "num_steps": args.num_steps,
         "seed": args.seed,
     }
@@ -299,8 +276,6 @@ def _resolve_data_path(args, task):
         return args.data_pref
     if task == "qa":
         return args.data_qa
-    if task == "spc":
-        return args.data_spc
     raise ValueError(task)
 
 
@@ -321,10 +296,10 @@ def aggregate_results(output_dir):
         grid[key][r["task"]] = r["asr"]
 
     print(f"{'Target':<20s} {'Surrogate':<30s} "
-          f"{'Prom':>6s} {'Deg':>6s} {'QA':>6s} {'SPC':>6s} {'Avg':>6s}")
+          f"{'Prom':>6s} {'Deg':>6s} {'QA':>6s} {'Avg':>6s}")
     print("-" * 100)
 
-    csv_rows = [["target", "surrogate", "prom", "deg", "qa", "spc", "avg"]]
+    csv_rows = [["target", "surrogate", "prom", "deg", "qa", "avg"]]
     for (tgt, surr), tasks in sorted(grid.items()):
         vals = [tasks.get(t, None) for t in ALL_TASKS]
         valid = [v for v in vals if v is not None]
@@ -351,11 +326,8 @@ def parse_args():
 
     p.add_argument("--data-pref", default="data/pref_manipulation_filtered.json")
     p.add_argument("--data-qa", default="data/squad_qa_filtered.json")
-    p.add_argument("--data-spc", default="data/guardrail_dataset.json")
 
     p.add_argument("--backend-llm", default="meta-llama/Llama-3.1-8B-Instruct")
-    p.add_argument("--judge-llm",
-                   help="reserved; legacy SPC mismatch execution is disabled")
     p.add_argument("--llm-provider", default="auto",
                    choices=["auto", "server", "offline"])
     p.add_argument("--compression-rate", type=float, default=0.6)
@@ -385,10 +357,6 @@ def main():
     if not args.target_compressor or not args.surrogate_model or not args.task:
         log.error("--target-compressor, --surrogate-model, --task required")
         sys.exit(1)
-    try:
-        reject_legacy_spc_task(args.task)
-    except ValueError as exc:
-        raise SystemExit(f"ERROR: {exc}") from None
     run_single_config(args)
 
 

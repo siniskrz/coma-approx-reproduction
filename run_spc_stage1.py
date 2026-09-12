@@ -8,7 +8,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from comattack.spc_query_suffix import FORBIDDEN_ARTIFACT_FIELDS
+from comattack.spc_query_suffix import validate_blind_row
 from comattack.spc_stages import select_dropout_target
 from run_spc_asr import LLMLingua2, OpenAICompatible, _call, build_joint_prompt, load_records
 
@@ -16,16 +16,6 @@ from run_spc_asr import LLMLingua2, OpenAICompatible, _call, build_joint_prompt,
 def parse_label(text: str) -> str:
     value = (text or "").strip().upper()
     return value if value in {"YES", "NO"} else "UNKNOWN"
-
-
-def validate_blind_row(row: dict) -> None:
-    leaked = FORBIDDEN_ARTIFACT_FIELDS.intersection(row)
-    if leaked:
-        raise ValueError(f"blind Stage-I input leaks trusted fields: {sorted(leaked)}")
-    required = ("sample_id", "source_hash", "original_query", "surrogate_query", "surrogate_prefix",
-                "surrogate_guardrails", "critical_candidates")
-    if any(row.get(key) in (None, "", []) for key in required):
-        raise ValueError(f"blind Stage-I row is missing one of: {', '.join(required)}")
 
 
 def run_stage1(rows: list[dict], compressor, backend, judge) -> list[dict]:
@@ -115,7 +105,9 @@ def main() -> None:
     for row in results:
         status = row["stage1"]["status"]
         counts[status] = counts.get(status, 0) + 1
-    print(json.dumps({"n": len(results), "stage1_status": counts}, indent=2))
+    surrogate_ids = {row["public_surrogate_id"] for row in results}
+    print(json.dumps({"n": len(results), "unique_public_surrogates": len(surrogate_ids),
+                      "stage1_status": counts}, indent=2))
 
 
 if __name__ == "__main__":

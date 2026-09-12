@@ -25,8 +25,8 @@ def load_rows(path: Path) -> list[dict]:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--private-data", default=str(ROOT / "data" / "toy_spc_permissions.json"))
-    parser.add_argument("--public-pool", default=str(ROOT / "data" / "public_toy_surrogate_pool.json"))
+    parser.add_argument("--private-data", default=str(ROOT / "data" / "toy_spc_permissions_v2.json"))
+    parser.add_argument("--public-pool", default=str(ROOT / "data" / "public_toy_surrogate_pool_v2.json"))
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
 

@@ -11,7 +11,6 @@ OUTPUT="results/rq3_mismatch"
 LOG_DIR="${OUTPUT}/logs"
 DATA_PREF="data/pref_manipulation_filtered.json"
 DATA_QA="data/squad_qa_filtered.json"
-DATA_SPC="data/guardrail_dataset.json"
 BACKEND="meta-llama/Llama-3.1-8B-Instruct"
 STEPS=500
 SEED=42
@@ -29,17 +28,11 @@ while [[ $# -gt 0 ]]; do
         --steps)       STEPS="$2"; shift 2 ;;
         --seed)        SEED="$2"; shift 2 ;;
         --backend)     BACKEND="$2"; shift 2 ;;
-        --judge)
-            echo "ERROR: legacy SPC surrogate-mismatch runs are disabled; use the dedicated query-suffix pipeline." >&2
-            exit 2 ;;
         --data-pref)   DATA_PREF="$2"; shift 2 ;;
         --data-qa)     DATA_QA="$2"; shift 2 ;;
-        --data-spc)    DATA_SPC="$2"; shift 2 ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
 done
-
-echo "[NOTICE] SPC is excluded; use the dedicated query-suffix pipeline."
 
 # split GPU list into array
 IFS=',' read -ra GPU_LIST <<< "${GPUS}"
@@ -100,7 +93,6 @@ launch() {
     cmd+=" --task ${task}"
     cmd+=" --data-pref ${DATA_PREF}"
     cmd+=" --data-qa ${DATA_QA}"
-    cmd+=" --data-spc ${DATA_SPC}"
     cmd+=" --backend-llm ${BACKEND}"
     cmd+=" --num-steps ${STEPS}"
     cmd+=" --seed ${SEED}"

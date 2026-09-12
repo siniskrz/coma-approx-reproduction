@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from collections.abc import Callable, Iterable
 
 
 RATES = (0.5, 0.6, 0.7)
+
+
+def record_sha256(value: dict) -> str:
+    """Hash a JSON record using one stable, reviewable representation."""
+    payload = json.dumps(value, ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def content_suffix_bounds(special_tokens_mask: list[int], suffix_length: int) -> tuple[int, int]:
@@ -59,11 +68,11 @@ def select_dropout_target(
             "trials": [],
         }
 
-    current = compressed_prompt
     trials = []
-    deleted = []
     for candidate in critical_candidates:
-        changed, occurrence = delete_first_occurrence(current, str(candidate))
+        # Each candidate is an independent counterfactual. Accumulating earlier
+        # deletions would make the final token look causal when only the set was.
+        changed, occurrence = delete_first_occurrence(compressed_prompt, str(candidate))
         if changed is None:
             trials.append({"candidate": str(candidate), "status": "NOT_PRESENT"})
             continue
@@ -72,15 +81,13 @@ def select_dropout_target(
                  "deleted_occurrence": occurrence, "target_prompt": changed,
                  "outcome": outcome}
         trials.append(trial)
-        deleted.append(occurrence)
-        current = changed
         if outcome.get("label") == "YES":
             return {
                 "status": "COMPLETE",
                 "baseline_label": "NO",
                 "counterfactual_label": "YES",
-                "selected_target": current,
-                "critical_occurrences": deleted,
+                "selected_target": changed,
+                "critical_occurrences": [occurrence],
                 "baseline": baseline,
                 "surrogate_guardrails": guardrails,
                 "trials": trials,
@@ -91,7 +98,7 @@ def select_dropout_target(
                 "baseline_label": "NO",
                 "counterfactual_label": "UNKNOWN",
                 "selected_target": None,
-                "critical_occurrences": deleted,
+                "critical_occurrences": [],
                 "baseline": baseline,
                 "surrogate_guardrails": guardrails,
                 "trials": trials,
@@ -102,18 +109,48 @@ def select_dropout_target(
         "baseline_label": "NO",
         "counterfactual_label": "NO",
         "selected_target": None,
-        "critical_occurrences": deleted,
+        "critical_occurrences": [],
         "baseline": baseline,
         "surrogate_guardrails": guardrails,
         "trials": trials,
     }
 
 
+def validate_stage_one_result(stage1: object) -> None:
+    """Reject a COMPLETE marker unless its recorded NO→YES evidence agrees."""
+    if not isinstance(stage1, dict) or stage1.get("status") != "COMPLETE":
+        raise ValueError("Stage-II requires a completed Stage-I record")
+    baseline = stage1.get("baseline")
+    trials = stage1.get("trials")
+    occurrences = stage1.get("critical_occurrences")
+    successful = [trial for trial in trials or [] if isinstance(trial, dict)
+                  and isinstance(trial.get("outcome"), dict)
+                  and trial["outcome"].get("label") == "YES"]
+    if (stage1.get("baseline_label") != "NO" or
+            stage1.get("counterfactual_label") != "YES" or
+            not isinstance(baseline, dict) or baseline.get("label") != "NO" or
+            len(successful) != 1 or
+            not isinstance(occurrences, list) or len(occurrences) != 1 or
+            stage1.get("selected_target") != successful[0].get("target_prompt") or
+            occurrences[0] != successful[0].get("deleted_occurrence")):
+        raise ValueError("Stage-I COMPLETE record lacks consistent NO-to-YES evidence")
+    for evidence in (baseline, successful[0]["outcome"]):
+        if (not isinstance(evidence.get("backend"), dict) or
+                not isinstance(evidence.get("judge"), dict) or
+                evidence["backend"].get("request") is None or
+                evidence["backend"].get("response") is None or
+                evidence["backend"].get("error") is not None or
+                evidence["judge"].get("request") is None or
+                evidence["judge"].get("response") is None or
+                evidence["judge"].get("error") is not None or
+                str(evidence["judge"].get("content", "")).strip().upper() != evidence["label"]):
+            raise ValueError("Stage-I COMPLETE record lacks raw backend/Judge evidence")
+
+
 def stage_two_inputs(row: dict) -> tuple[str, str, str, str]:
     """Return public prefix/query/target sentence/target text from completed Stage-I."""
     stage1 = row.get("stage1")
-    if not isinstance(stage1, dict) or stage1.get("status") != "COMPLETE":
-        raise ValueError("Stage-II requires a completed Stage-I record")
+    validate_stage_one_result(stage1)
     guardrails = stage1.get("surrogate_guardrails")
     occurrences = stage1.get("critical_occurrences")
     if not isinstance(guardrails, list) or not guardrails:
@@ -204,7 +241,8 @@ def make_stage_two_artifact(
         "validated": result["validated"],
         "selected": selected,
         "candidates": result["candidates"],
-        "raw_provenance": raw_provenance or {},
+        "raw_provenance": {"stage1_sha256": record_sha256(row.get("stage1", {})),
+                           **(raw_provenance or {})},
     }
     artifact = {
         "id": str(row.get("sample_id", row.get("id", ""))),
