@@ -1,9 +1,0 @@
-[
-  {
-    "pool_id": "public-shared-rule-v2",
-    "surrogate_prefix": "The following public made-up board-game rule applies to a colored marker.",
-    "surrogate_guardrails": ["The teal marker is forbidden from taking lane delta."],
-    "surrogate_query": "Under this public rule, may the teal marker take lane delta? Reply exactly APPROVED or DENIED.",
-    "critical_candidates": ["forbidden"]
-  }
-]

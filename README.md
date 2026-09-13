@@ -63,15 +63,8 @@ This is the only route in this repository whose output may be reported as an
 SPC approximation. The adversary receives a blind input containing the
 untrusted query and independent public-surrogate policy text; it never receives
 or changes the victim system prompt. At evaluation time, system, context, and
-query share one compression budget. The included dataset contains 20 low-risk,
-fictional permission examples, so these results are a development experiment,
-not the paper's reported ASR or a strict reproduction.
-
-The bundled V2 pool intentionally contains one public surrogate rule. Stage I
-therefore reports `unique_public_surrogates: 1`; its 20 rows are repeated trials
-bound to private sample provenance, not 20 independent attack targets. Add
-distinct, licensed public surrogate rules before interpreting cross-target
-generalization.
+query share one compression budget. No toy SPC dataset is bundled; construct a
+fresh, provenance-bound dataset from pinned public sources before running ASR.
 
 Install the limited SPC dependencies, pin every local model snapshot and hash,
 and provide API keys only through the named environment variables:
@@ -79,9 +72,19 @@ and provide API keys only through the named environment variables:
 ```bash
 pip install -r requirements-spc.txt
 
+python reconstruction_tools/build_four_source_spc_candidates.py \
+  --source-root /path/to/pinned/source-repos \
+  --output results/spc/candidates.json \
+  --per-source 8
+
+python reconstruction_tools/transform_four_source_spc.py \
+  --input results/spc/candidates.json \
+  --output-dir results/spc/transformed \
+  --deterministic --model deterministic-v1
+
 python prepare_spc_blind_inputs.py \
-  --private-data data/toy_spc_permissions_v2.json \
-  --public-pool data/public_toy_surrogate_pool_v2.json \
+  --private-data results/spc/transformed/private_samples.json \
+  --public-pool results/spc/transformed/public_surrogates.json \
   --output results/spc/blind.jsonl
 
 python run_spc_stage1.py \
@@ -110,7 +113,7 @@ python run_spc_stage2.py \
   --eval-batch-size 128 --checkpoint-every 25
 
 python run_spc_asr.py \
-  --data data/toy_spc_permissions_v2.json \
+  --data results/spc/transformed/private_samples.json \
   --attack-results results/spc/attacks.jsonl \
   --output results/spc/asr.json \
   --compressor llmlingua2 \
@@ -193,4 +196,3 @@ artifact/
   run_surrogate_mismatch.sh  # Batch launcher: surrogate grid
 
 ```
-
