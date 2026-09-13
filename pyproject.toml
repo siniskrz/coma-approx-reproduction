@@ -20,6 +20,7 @@ spc = [
   "llmlingua==0.2.2",
   "openai==1.109.1",
   "sentencepiece==0.2.1",
+  "huggingface_hub>=0.24",
 ]
 
 [tool.setuptools.packages.find]
