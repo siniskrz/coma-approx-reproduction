@@ -53,6 +53,10 @@ Each RQ has a dedicated reproduction script:
 | RQ4 | `scripts/reproduce_rq4.sh` | Case studies: VSCode Cline, LangChain+Ollama
 | RQ5 | `scripts/reproduce_rq5.sh` | Defense evaluation
 
+### Pinned public assets
+
+Use `reconstruction_tools/fetch_public_assets.py --output <assets-dir> --models` to fetch the four source repositories and fixed Hugging Face snapshots. The command records exact revisions and weight hashes in `public_assets_manifest.json`; run subsequent stages with `HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1`.
+
 ### Reportable SPC approximation: query suffix only
 
 This is the only route in this repository whose output may be reported as an
