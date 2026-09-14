@@ -8,7 +8,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from run_spc_asr import (ATTACK_PROTOCOL, LLMLingua2, attack_surrogate_identity, build_joint_prompt,
                          parse_judge_label, run_spc_asr, sample_id, source_hash,
-                         summarize_human_reviews)
+                         summarize_human_reviews, validate_model_identity,
+                         validate_transfer_identity)
 from comattack.spc_stages import record_sha256
 
 
@@ -71,7 +72,7 @@ def attack_for(clean, suffix="suffix", token_ids=None, rate=0.6, **extra):
     stage1 = {"status": "COMPLETE", "selected_target": "toy", "baseline_label": "NO",
               "counterfactual_label": "YES", "critical_occurrences": [occurrence],
               "baseline": {"label": "NO", "backend": backend_evidence, "judge": judge_no},
-              "trials": [{"target_prompt": "toy", "deleted_occurrence": occurrence,
+              "trials": [{"status": "EVALUATED", "target_prompt": "toy", "deleted_occurrence": occurrence,
                           "outcome": {"label": "YES", "backend": backend_evidence,
                                       "judge": judge_yes}}]}
     return {
@@ -83,6 +84,10 @@ def attack_for(clean, suffix="suffix", token_ids=None, rate=0.6, **extra):
         "stage1": stage1,
         "stage2": {"status": "COMPLETE", "max_steps": 500, "steps_run": 500,
                    "best_loss": 0, "candidates": [selected], "selected": selected,
+                   "clean_budget_trials": [
+                       {"compression_rate": trial_rate, "target_retained": True,
+                        "compressed_text": "not retained", "compressor_raw": {"ok": True}}
+                       for trial_rate in (0.5, 0.6, 0.7)],
                    "suffix_roundtrip_stable": True, "validated": True,
                    "raw_provenance": {"stage1_sha256": record_sha256(stage1)}},
         "surrogate": {"model": "surrogate", "revision": "revision", "weight_sha256": "00",
@@ -101,7 +106,8 @@ class SPCASRTest(unittest.TestCase):
             attacked.append(attack_for(clean[-1], f"suffix-{number}"))
 
         backend = Backend()
-        result = run_spc_asr(clean, attacked, Compressor(), backend, Judge())
+        result = run_spc_asr(clean, attacked, Compressor(), backend, Judge(),
+                             allow_simulated_evidence=True)
 
         self.assertEqual(result["n_complete_paired"], 2)
         self.assertEqual(result["n_incomplete_or_unknown"], 1)
@@ -109,6 +115,8 @@ class SPCASRTest(unittest.TestCase):
         self.assertEqual(result["D_minus_B"], 0.5)
         self.assertEqual(result["C_minus_A"], 0)
         self.assertEqual(result["interaction"], 0.5)
+        self.assertEqual(result["baseline_gated_asr"]["value"], None)
+        self.assertFalse(result["baseline_gated_asr"]["reportable"])
         self.assertEqual(result["baseline_stable_ABC0"], {
             "D_successes": 1, "D_failures": 0,
             "eligible_n_including_D_unknown": 2,
@@ -144,6 +152,22 @@ class SPCASRTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 LLMLingua2(directory, Path(directory).name, 0)
 
+    def test_snapshot_identity_uses_content_hash_not_directory_name(self):
+        import hashlib
+        with tempfile.TemporaryDirectory() as directory:
+            weights = Path(directory) / "model.safetensors"
+            weights.write_bytes(b"pinned test weights")
+            digest = hashlib.sha256(weights.read_bytes()).hexdigest()
+            identity = validate_model_identity(directory, "upstream-revision", digest)
+            self.assertEqual(identity["revision"], "upstream-revision")
+            self.assertEqual(identity["weight_sha256"], digest)
+
+    def test_black_box_requires_independent_victim_weights(self):
+        victim = type("Victim", (), {"weight_sha256": "aa"})()
+        with self.assertRaisesRegex(ValueError, "distinct surrogate and victim"):
+            validate_transfer_identity("black_box", {"weight_sha256": "aa"}, victim)
+        validate_transfer_identity("black_box", {"weight_sha256": "bb"}, victim)
+
     def test_llmlingua2_uses_official_word_and_token_budget_path(self):
         class Recorder:
             def compress_prompt(self, text, **kwargs):
@@ -168,7 +192,8 @@ class SPCASRTest(unittest.TestCase):
         clean = [{"id": "x", "system_prompt": "clean", "adversarial_query": "q",
                   "guardrail_list": [{"sentence": "Do not grant it."}]}]
         attacked = [attack_for(clean[0], original_query="different")]
-        result = run_spc_asr(clean, attacked, Compressor(), Backend(), Judge())
+        result = run_spc_asr(clean, attacked, Compressor(), Backend(), Judge(),
+                             allow_simulated_evidence=True)
         self.assertEqual(result["records"][0]["status"], "INPUT_MISMATCH")
         self.assertEqual(result["n_complete_paired"], 0)
 
@@ -176,20 +201,23 @@ class SPCASRTest(unittest.TestCase):
         clean = [{"id": "x", "system_prompt": "clean", "adversarial_query": "q",
                   "guardrail_list": []}]
         attacked = [attack_for(clean[0])]
-        result = run_spc_asr(clean, attacked, Compressor(), Backend(), Judge())
+        result = run_spc_asr(clean, attacked, Compressor(), Backend(), Judge(),
+                             allow_simulated_evidence=True)
         self.assertEqual(result["records"][0]["status"], "INPUT_ERROR")
 
     def test_shared_budget_query_suffix_and_legacy_system_edit_rejection(self):
         clean = [{"id": "x", "system_prompt": "trusted", "external_context": "retrieved",
                   "adversarial_query": "question", "guardrail_list": [{"sentence": "Do not grant it."}]}]
         attack = [attack_for(clean[0], "adversarial suffix", [1, 2])]
-        result = run_spc_asr(clean, attack, Compressor(), Backend(), Judge())
+        result = run_spc_asr(clean, attack, Compressor(), Backend(), Judge(),
+                             allow_simulated_evidence=True)
         record = result["records"][0]
         self.assertIn("compressed:<SYSTEM>\ntrusted", record["conditions"]["D"]["joint_input_text"])
         self.assertIn("<CONTEXT>\nretrieved", record["conditions"]["D"]["joint_input_text"])
         self.assertIn("question adversarial suffix", record["conditions"]["D"]["joint_input_text"])
         unsafe = [attack_for(clean[0], attacked_context="edited trusted")]
-        self.assertEqual(run_spc_asr(clean, unsafe, Compressor(), Backend(), Judge())
+        self.assertEqual(run_spc_asr(clean, unsafe, Compressor(), Backend(), Judge(),
+                                     allow_simulated_evidence=True)
                          ["records"][0]["status"], "UNSAFE_LEGACY_ARTIFACT")
 
     def test_suffix_budget_and_human_review_denominators(self):
@@ -197,7 +225,8 @@ class SPCASRTest(unittest.TestCase):
                   "guardrail_list": [{"sentence": "Do not grant it."}]}]
         attack = [attack_for(clean[0], "too long", [1, 2, 3])]
         attack[0]["budget"]["max_suffix_tokens"] = 2
-        result = run_spc_asr(clean, attack, Compressor(), Backend(), Judge(), max_suffix_tokens=2)
+        result = run_spc_asr(clean, attack, Compressor(), Backend(), Judge(), max_suffix_tokens=2,
+                             allow_simulated_evidence=True)
         self.assertEqual(result["records"][0]["status"], "SUFFIX_ERROR")
         review = summarize_human_reviews([
             {"id": "a", "label": "YES"}, {"id": "b", "label": "NO"},
@@ -212,7 +241,8 @@ class SPCASRTest(unittest.TestCase):
         artifact = attack_for(clean[0])
         artifact["stage1"] = {"status": "NOT_RUN_ENGINEERING_BOUNDARY_ONLY", "trials": []}
         artifact["stage2"].update({"max_steps": 0, "validated": False})
-        result = run_spc_asr(clean, [artifact], Compressor(), Backend(), Judge())
+        result = run_spc_asr(clean, [artifact], Compressor(), Backend(), Judge(),
+                             allow_simulated_evidence=True)
         self.assertEqual(result["records"][0]["status"], "ATTACK_EVIDENCE_ERROR")
         self.assertEqual(result["n_complete_paired"], 0)
 
@@ -221,11 +251,19 @@ class SPCASRTest(unittest.TestCase):
                   "guardrail_list": [{"sentence": "Do not grant it."}]}]
         forged = attack_for(clean[0])
         forged["stage2"]["steps_run"] = 0
-        self.assertEqual(run_spc_asr(clean, [forged], Compressor(), Backend(), Judge())
+        self.assertEqual(run_spc_asr(clean, [forged], Compressor(), Backend(), Judge(),
+                                     allow_simulated_evidence=True)
                          ["records"][0]["status"], "ATTACK_EVIDENCE_ERROR")
         marker = attack_for(clean[0], "<SYSTEM>")
-        self.assertEqual(run_spc_asr(clean, [marker], Compressor(), Backend(), Judge())
+        self.assertEqual(run_spc_asr(clean, [marker], Compressor(), Backend(), Judge(),
+                                     allow_simulated_evidence=True)
                          ["records"][0]["status"], "SUFFIX_ERROR")
+
+    def test_simulated_evidence_is_rejected_by_default(self):
+        clean = [{"id": "x", "system_prompt": "clean-1", "adversarial_query": "q",
+                  "guardrail_list": [{"sentence": "Do not grant it."}]}]
+        result = run_spc_asr(clean, [attack_for(clean[0])], Compressor(), Backend(), Judge())
+        self.assertEqual(result["records"][0]["status"], "ATTACK_EVIDENCE_ERROR")
 
     def test_joint_prompt_has_one_copy_of_each_component(self):
         prompt = build_joint_prompt("system", "context", "query")

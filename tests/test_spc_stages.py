@@ -7,6 +7,7 @@ from comattack.spc_stages import (
     select_dropout_target,
     stage_two_inputs,
     validate_budget_candidates,
+    validate_stage_one_result,
 )
 
 
@@ -67,6 +68,21 @@ class SPCStagesTest(unittest.TestCase):
                                   lambda prompt: {"label": "NO"},
                                   surrogate_guardrails=[])
 
+    def test_stage_one_rejects_invalid_evidence_in_an_earlier_trial(self):
+        occurrence = {"text": "not", "start": 5, "end": 8}
+        stage1 = {
+            "status": "COMPLETE", "baseline_label": "NO", "counterfactual_label": "YES",
+            "selected_target": "must enter", "critical_occurrences": [occurrence],
+            "baseline": self.evidence("NO"),
+            "trials": [
+                {"status": "EVALUATED", "outcome": {"label": "NO"}},
+                {"status": "EVALUATED", "target_prompt": "must enter",
+                 "deleted_occurrence": occurrence, "outcome": self.evidence("YES")},
+            ],
+        }
+        with self.assertRaisesRegex(ValueError, "raw backend/Judge"):
+            validate_stage_one_result(stage1)
+
     def test_stage_two_requires_all_three_rates(self):
         candidates = [{"suffix": "toy marker", "suffix_token_ids": [1, 2],
                        "suffix_token_count": 2, "suffix_roundtrip_stable": True,
@@ -85,7 +101,7 @@ class SPCStagesTest(unittest.TestCase):
             "selected_target": "target", "critical_occurrences": [occurrence],
             "surrogate_guardrails": ["A public token is not admitted."],
             "baseline": self.evidence("NO"),
-            "trials": [{"target_prompt": "target", "deleted_occurrence": occurrence,
+            "trials": [{"status": "EVALUATED", "target_prompt": "target", "deleted_occurrence": occurrence,
                         "outcome": self.evidence("YES")}],
         }
         row = {"sample_id": "toy-perm-01", "source_hash": "ab" * 32,

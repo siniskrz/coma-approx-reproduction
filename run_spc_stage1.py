@@ -18,7 +18,10 @@ def parse_label(text: str) -> str:
     return value if value in {"YES", "NO"} else "UNKNOWN"
 
 
-def run_stage1(rows: list[dict], compressor, backend, judge) -> list[dict]:
+def run_stage1(rows: list[dict], compressor, backend, judge, *,
+               evidence_class: str = "SIMULATED_OR_CUSTOM") -> list[dict]:
+    if evidence_class not in {"LIVE_MODEL_AND_API", "SIMULATED_OR_CUSTOM"}:
+        raise ValueError("unsupported Stage-I evidence class")
     output = []
     for row in rows:
         validate_blind_row(row)
@@ -57,6 +60,7 @@ def run_stage1(rows: list[dict], compressor, backend, judge) -> list[dict]:
             surrogate_guardrails=row["surrogate_guardrails"],
         )
         stage1["raw_provenance"] = {
+            "evidence_class": evidence_class,
             "joint_prompt_sha256": hashlib.sha256(joint.encode("utf-8")).hexdigest(),
             "compressor": type(compressor).__name__,
             "compressor_revision": getattr(compressor, "revision", None),
@@ -96,7 +100,8 @@ def main() -> None:
                             args.compression_rate, args.compressor_weight_sha256)
     backend = OpenAICompatible(args.backend_url, args.backend_model, args.backend_key_env)
     judge = OpenAICompatible(args.judge_url, args.judge_model, args.judge_key_env)
-    results = run_stage1(load_records(args.blind_inputs)[:args.max_items], compressor, backend, judge)
+    results = run_stage1(load_records(args.blind_inputs)[:args.max_items], compressor, backend, judge,
+                         evidence_class="LIVE_MODEL_AND_API")
     path = Path(args.output)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in results) + "\n",

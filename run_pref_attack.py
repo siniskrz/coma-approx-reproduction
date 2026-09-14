@@ -155,39 +155,40 @@ def compute_pref_target_offline(entry: dict) -> dict:
             "strategy": "best_text_empty",
         }
 
-    # heuristic: identify distinguishing words in best that don't appear in target
-    target_text = entry.get(target, "")
-    best_words = set(best_text.lower().split())
-    target_words = set(target_text.lower().split()) if target_text else set()
-    # words unique to best candidate (not in target)
-    unique_to_best = best_words - target_words
-    # remove common stopwords
+    # Choose one uniquely located content word.  The extractive attack accepts
+    # one contiguous target span; returning a bag of unrelated words makes all
+    # preference rows get skipped downstream.
     stopwords = {"the", "a", "an", "is", "are", "was", "were", "be", "been",
                  "being", "have", "has", "had", "do", "does", "did", "will",
                  "would", "could", "should", "may", "might", "shall", "can",
                  "and", "or", "but", "if", "for", "in", "on", "at", "to",
                  "of", "with", "by", "from", "as", "into", "it", "its",
-                 "this", "that", "these", "those"}
-    keywords_to_remove = unique_to_best - stopwords
-
-    # remove these keywords from the best candidate section in context
-    target_context = context
+                 "this", "that", "these", "those", "option"}
     removed = []
-    for kw in list(keywords_to_remove)[:10]:  # limit removals
-        pattern = re.compile(r"\b" + re.escape(kw) + r"\b", re.IGNORECASE)
-        if pattern.search(target_context):
-            target_context = pattern.sub("", target_context)
-            removed.append(kw)
+    span_start = -1
+    for match in re.finditer(r"\b[A-Za-z][A-Za-z'-]*\b", best_text):
+        word = match.group(0)
+        if word.lower() in stopwords:
+            continue
+        occurrences = list(re.finditer(r"\b" + re.escape(word) + r"\b",
+                                       context, re.IGNORECASE))
+        if len(occurrences) == 1:
+            removed = [word]
+            span_start = occurrences[0].start()
+            break
 
-    target_context = re.sub(r"\s{2,}", " ", target_context).strip()
+    target_context = context
+    if removed:
+        target_context = context[:span_start] + context[span_start + len(removed[0]):]
 
     return {
         "original_context": context,
         "target_context": target_context,
         "deleted_words": removed,
         "n_deletions": len(removed),
+        "span_start": span_start,
         "success": len(removed) > 0,
-        "strategy": "heuristic_keyword_removal",
+        "strategy": "single_unique_keyword_removal",
     }
 
 
@@ -362,7 +363,7 @@ def parse_args():
     p.add_argument("--max-entries", type=int, default=-1, help="Limit entries (-1 = all)")
 
     p.add_argument("--compressor", required=True,
-                   choices=["llmlingua1", "llmlingua2", "selective_context",
+                   choices=["llmlingua1", "llmlingua2",
                             "qwen3-4b", "llama-3.2-3b", "gemma-3-4b"])
     p.add_argument("--surrogate-model", required=True,
                    help="HuggingFace model name for the surrogate")
@@ -392,7 +393,7 @@ def main():
         dataset = dataset[:args.max_entries]
     log.info("Loaded %d entries", len(dataset))
 
-    extractive = {"llmlingua1", "llmlingua2", "selective_context"}
+    extractive = {"llmlingua1", "llmlingua2"}
     abstractive = {"qwen3-4b", "llama-3.2-3b", "gemma-3-4b"}
 
     if args.compressor in extractive:

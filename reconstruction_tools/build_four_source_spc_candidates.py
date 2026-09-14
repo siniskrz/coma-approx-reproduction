@@ -75,7 +75,17 @@ def main() -> None:
         parser.error("--per-source must be positive")
 
     source_root = Path(args.source_root).resolve()
-    repositories = sorted(path for path in source_root.iterdir() if (path / ".git").is_dir())
+    asset_manifest = source_root.parent / "public_assets_manifest.json"
+    if asset_manifest.is_file():
+        source_records = json.loads(asset_manifest.read_text(encoding="utf-8")).get("sources", [])
+        names = [row.get("name") for row in source_records]
+        if any(not name or Path(name).name != name for name in names):
+            raise ValueError("public asset manifest contains an invalid source name")
+        repositories = sorted(source_root / name for name in names)
+        if any(not (repo / ".git").is_dir() for repo in repositories):
+            raise ValueError("public asset manifest references a missing source repository")
+    else:
+        repositories = sorted(path for path in source_root.iterdir() if (path / ".git").is_dir())
     if len(repositories) != 4:
         raise ValueError(f"expected exactly four source repositories, found {len(repositories)}")
 

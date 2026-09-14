@@ -195,9 +195,14 @@ def evaluate_dataset(
     compression_rate: float = 0.6,
     task_prompt_builder: Optional[Callable] = None,
     judge_llm=None,
+    clean_texts: Optional[list] = None,
 ) -> dict:
     """
-    Evaluate a full dataset and return aggregate ASR.
+    Evaluate clean/attacked pairs and return causal ASR.
+
+    A sample is eligible only when the clean input does not already satisfy
+    the task's attack-success predicate.  ASR is the fraction of eligible
+    clean samples that transition to attack success.
     """
     from tqdm import tqdm
 
@@ -205,30 +210,63 @@ def evaluate_dataset(
         raise ValueError(
             f"dataset/attack length mismatch: {len(dataset)} != {len(attacked_texts)}"
         )
+    if clean_texts is None:
+        field = {"prom": "original_context", "deg": "original_context",
+                 "qa": "context", "spc": "system_prompt"}.get(task)
+        if field is None:
+            raise ValueError(f"Unknown task: {task}")
+        clean_texts = [entry.get(field) for entry in dataset]
+    elif len(dataset) != len(clean_texts):
+        raise ValueError(
+            f"dataset/clean length mismatch: {len(dataset)} != {len(clean_texts)}"
+        )
+    if any(not isinstance(text, str) or not text for text in clean_texts):
+        raise ValueError("clean baseline requires non-empty text")
 
     successes = 0
     total = 0
     unknown = 0
+    ineligible = 0
     per_instance = []
 
-    for entry, atk_text in tqdm(
-        zip(dataset, attacked_texts), total=len(dataset), desc=f"E2E eval ({task})"
+    for entry, clean_text, atk_text in tqdm(
+        zip(dataset, clean_texts, attacked_texts),
+        total=len(dataset), desc=f"E2E eval ({task})"
     ):
-        r = evaluate_single(
+        clean = evaluate_single(
+            entry, clean_text, compressor, backend_llm, task,
+            compression_rate, task_prompt_builder, judge_llm,
+        )
+        attacked = evaluate_single(
             entry, atk_text, compressor, backend_llm, task,
             compression_rate, task_prompt_builder, judge_llm,
         )
+        eligible = clean["success"] is False
+        causal_success = attacked["success"] if eligible else None
+        r = {
+            **attacked,
+            "attack_success": attacked["success"],
+            "clean_compressed_text": clean["compressed_text"],
+            "clean_llm_output": clean["llm_output"],
+            "clean_success": clean["success"],
+            "eligible": eligible,
+            "success": causal_success,
+        }
         per_instance.append(r)
-        if r["success"] is None:
+        if clean["success"] is None or (eligible and attacked["success"] is None):
             unknown += 1
             continue
-        if r["success"]:
+        if not eligible:
+            ineligible += 1
+            continue
+        if causal_success:
             successes += 1
         total += 1
 
     asr = successes / total if total else None
     return {"asr": asr, "successes": successes, "total": total,
             "n_input": len(dataset), "unknown": unknown,
+            "ineligible_clean_failures": ineligible,
             "per_instance": per_instance}
 
 

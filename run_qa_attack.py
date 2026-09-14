@@ -219,7 +219,7 @@ def parse_args():
 
     # compressor / method
     p.add_argument("--compressor", required=True,
-                   choices=["llmlingua1", "llmlingua2", "selective_context",
+                   choices=["llmlingua1", "llmlingua2",
                             "qwen3-4b", "llama-3.2-3b", "gemma-3-4b"],
                    help="Target compressor")
     p.add_argument("--surrogate-model", required=True,
@@ -256,7 +256,7 @@ def main():
     log.info("Loaded %d entries", len(dataset))
 
     # dispatch based on compressor type
-    extractive = {"llmlingua1", "llmlingua2", "selective_context"}
+    extractive = {"llmlingua1", "llmlingua2"}
     abstractive = {"qwen3-4b", "llama-3.2-3b", "gemma-3-4b"}
 
     if args.compressor in extractive:

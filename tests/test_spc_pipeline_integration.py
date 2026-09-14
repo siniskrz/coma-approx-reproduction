@@ -81,12 +81,15 @@ class PipelineIntegrationTest(unittest.TestCase):
         stage1 = run_stage1(blind, Compressor(), StageBackend(), StageJudge())
         attacks = run_stage2(
             stage1, Attacker(), Tokenizer(),
-            lambda prompt, rate: {"text": prompt.replace(" not ", " "), "raw": {"rate": rate}},
+            lambda prompt, rate: {
+                "text": prompt.replace(" not ", " ") if "xxxxxx" in prompt else prompt,
+                "raw": {"rate": rate}},
             {"model": "public-surrogate", "revision": "r", "weight_sha256": "h",
              "auxiliary_files": {"tokenizer.json": "x"}},
             initial_suffix="xxxxxx",
         )
-        result = run_spc_asr(private, attacks, Compressor(), VictimBackend(), VictimJudge())
+        result = run_spc_asr(private, attacks, Compressor(), VictimBackend(), VictimJudge(),
+                             allow_simulated_evidence=True)
         self.assertEqual(result["n_complete_paired"], 1)
         self.assertEqual(attacks[0]["attack_suffix"], "xxxxxx")
         self.assertNotIn("system_prompt", attacks[0])

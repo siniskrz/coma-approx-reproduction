@@ -146,8 +146,8 @@ class LLMLingua2:
         if not 0 < rate <= 1:
             raise ValueError("compression rate must be in (0, 1]")
         path = Path(snapshot).resolve()
-        if not path.is_dir() or path.name != revision:
-            raise ValueError("compressor snapshot must exist and its directory name must equal --compressor-revision")
+        if not path.is_dir() or not revision.strip():
+            raise ValueError("compressor snapshot must exist and revision must be nonempty")
         self.weight_sha256, self.weight_files = model_weight_manifest(path)
         self.auxiliary_files = model_auxiliary_manifest(path)
         if expected_weight_sha256 and self.weight_sha256.lower() != expected_weight_sha256.lower():
@@ -279,7 +279,8 @@ def _suffix_token_count(attack: dict, suffix: str, tokenizer) -> tuple[int, str]
     return len(actual), "verified_surrogate_tokenizer"
 
 
-def _valid_attack_evidence(stage1: object, stage2: object) -> bool:
+def _valid_attack_evidence(stage1: object, stage2: object, surrogate: object,
+                           *, allow_simulated_evidence: bool = False) -> bool:
     """Check internal evidence consistency; this prevents placeholder artifacts.
 
     The run manifest binds the accepted JSON file by hash.  This is an audit
@@ -287,44 +288,31 @@ def _valid_attack_evidence(stage1: object, stage2: object) -> bool:
     """
     if not isinstance(stage1, dict) or not isinstance(stage2, dict):
         return False
-    from comattack.spc_stages import record_sha256
+    from comattack.spc_stages import (record_sha256, validate_stage_one_result,
+                                      validate_stage_one_surrogate_identity)
     provenance = stage2.get("raw_provenance")
     if (not isinstance(provenance, dict) or
             provenance.get("stage1_sha256") != record_sha256(stage1)):
         return False
-    trials = stage1.get("trials")
-    successful = [trial for trial in trials or [] if isinstance(trial, dict)
-                  and isinstance(trial.get("outcome"), dict)
-                  and trial["outcome"].get("label") == "YES"]
-    baseline = stage1.get("baseline")
+    stage1_provenance = stage1.get("raw_provenance")
+    if (not allow_simulated_evidence and
+            (not isinstance(stage1_provenance, dict) or
+             stage1_provenance.get("evidence_class") != "LIVE_MODEL_AND_API" or
+             provenance.get("evidence_class") != "LIVE_MODEL")):
+        return False
+    try:
+        if allow_simulated_evidence:
+            validate_stage_one_result(stage1)
+        else:
+            validate_stage_one_surrogate_identity(stage1, surrogate)
+    except ValueError:
+        return False
     occurrences = stage1.get("critical_occurrences")
-    if (stage1.get("status") != "COMPLETE" or
-            stage1.get("baseline_label") != "NO" or
-            stage1.get("counterfactual_label") != "YES" or
-            not isinstance(baseline, dict) or baseline.get("label") != "NO" or
-            len(successful) != 1 or not isinstance(occurrences, list) or len(occurrences) != 1 or
-            stage1.get("selected_target") != successful[0].get("target_prompt")):
-        return False
-    if occurrences[0] != successful[0].get("deleted_occurrence"):
-        return False
-    for evidence in (baseline, successful[0]["outcome"]):
-        if (not isinstance(evidence.get("backend"), dict) or
-                not isinstance(evidence.get("judge"), dict) or
-                evidence["backend"].get("request") is None or
-                evidence["backend"].get("response") is None or
-                evidence["judge"].get("request") is None or
-                evidence["judge"].get("response") is None):
-            return False
-        if (evidence["backend"].get("error") is not None or
-                not isinstance(evidence["backend"].get("content"), str) or
-                not evidence["backend"]["content"].strip() or
-                evidence["judge"].get("error") is not None or
-                evidence["judge"].get("content", "").strip().upper() != evidence["label"]):
-            return False
 
     steps = stage2.get("steps_run")
     selected = stage2.get("selected")
     candidates = stage2.get("candidates")
+    clean_budget_trials = stage2.get("clean_budget_trials")
     if (stage2.get("status") != "COMPLETE" or stage2.get("max_steps") != 500 or
             steps != 500 or
             stage2.get("validated") is not True or
@@ -334,6 +322,15 @@ def _valid_attack_evidence(stage1: object, stage2: object) -> bool:
     budget_trials = selected.get("budget_trials")
     target_text = occurrences[-1].get("text") if isinstance(occurrences[-1], dict) else None
     if (not isinstance(target_text, str) or not target_text.strip() or
+            not isinstance(clean_budget_trials, list) or len(clean_budget_trials) != 3 or
+            {trial.get("compression_rate") for trial in clean_budget_trials
+             if isinstance(trial, dict)} != {0.5, 0.6, 0.7} or
+            not all(trial.get("target_retained") is True and
+                    isinstance(trial.get("compressed_text"), str) and
+                    trial["compressed_text"].strip() and trial.get("compressor_raw") is not None and
+                    re.search(r"(?<!\w)" + re.escape(target_text) + r"(?!\w)",
+                              trial["compressed_text"], flags=re.IGNORECASE) is not None
+                    for trial in clean_budget_trials) or
             not isinstance(budget_trials, list) or
             {trial.get("compression_rate") for trial in budget_trials
              if isinstance(trial, dict)} != {0.5, 0.6, 0.7} or
@@ -361,6 +358,8 @@ def _safe_compress(compressor, text: str) -> dict:
         value = compressor.compress(text)
         if not isinstance(value, dict) or not isinstance(value.get("text"), str):
             raise ValueError("compressor must return {'text': str, ...}")
+        if value.get("raw") is None:
+            raise ValueError("compressor must retain raw output evidence")
         return {"text": value["text"], "raw": value.get("raw"), "error": None}
     except Exception as error:
         return {"text": "", "raw": None, "error": f"{type(error).__name__}: {error}"}
@@ -382,7 +381,8 @@ def _call(client, messages: list[dict], max_tokens: int) -> dict:
 def run_spc_asr(clean_rows: list[dict], attack_rows: list[dict], compressor, backend, judge,
                 *, suffix_tokenizer=None, max_suffix_tokens: int = 32,
                 expected_compression_rate: float | None = None,
-                max_input_tokens: int = 512) -> dict:
+                max_input_tokens: int = 512,
+                allow_simulated_evidence: bool = False) -> dict:
     if not 1 <= max_suffix_tokens <= 32:
         raise ValueError("max_suffix_tokens must be between 1 and 32")
     if max_input_tokens < 1:
@@ -422,7 +422,9 @@ def run_spc_asr(clean_rows: list[dict], attack_rows: list[dict], compressor, bac
         if (not isinstance(stage1, dict) or not isinstance(stage2, dict) or
                 not isinstance(surrogate, dict) or not isinstance(budget, dict) or
                 any(not surrogate.get(field) for field in ("model", "revision", "weight_sha256")) or
-                not _valid_attack_evidence(stage1, stage2)):
+                not _valid_attack_evidence(
+                    stage1, stage2, surrogate,
+                    allow_simulated_evidence=allow_simulated_evidence)):
             records.append({"sample_id": key, "status": "ATTACK_EVIDENCE_ERROR",
                             "error": "Stage-I flip or Stage-II 500-step/multi-budget/roundtrip evidence is incomplete",
                             "conditions": {}})
@@ -538,6 +540,8 @@ def run_spc_asr(clean_rows: list[dict], attack_rows: list[dict], compressor, bac
     stable_failures = len(stable_resolved) - stable_successes
     stable_d_unknown = [row["sample_id"] for row in stable_eligible
                         if row["conditions"]["D"]["label"] is None]
+    baseline_gated_asr = (stable_successes / len(stable_eligible)
+                          if stable_eligible and not stable_d_unknown else None)
     return {
         "protocol": "SPC_QUERY_SUFFIX_SHARED_BUDGET_APPROXIMATION_V1",
         "joint_prompt_format": JOINT_FORMAT,
@@ -560,6 +564,20 @@ def run_spc_asr(clean_rows: list[dict], attack_rows: list[dict], compressor, bac
                                   if stable_resolved else None,
                                   "D_unknown_n": len(stable_d_unknown),
                                   "D_unknown_sample_ids": stable_d_unknown},
+        "baseline_gated_asr": {
+            "definition": "D=YES among samples with A=B=C=NO; every eligible D must resolve",
+            "value": baseline_gated_asr,
+            "successes": stable_successes,
+            "eligible_n": len(stable_eligible),
+            "reportable": (not allow_simulated_evidence and
+                           bool(stable_eligible) and not stable_d_unknown),
+            "unreportable_reason": (
+                "simulated/custom evidence" if allow_simulated_evidence else
+                "no baseline-stable eligible samples" if not stable_eligible else
+                "eligible D labels include UNKNOWN" if stable_d_unknown else None),
+        },
+        "evidence_class": ("SIMULATED_OR_CUSTOM" if allow_simulated_evidence
+                           else "LIVE_MODEL_AND_API"),
         "baseline_gate": {"definition": "A=NO and B=NO and C=NO before D is eligible",
                           "eligible_sample_ids": [row["sample_id"] for row in stable_eligible],
                           "complete_but_ineligible_n": len(complete) - len(stable_resolved)},
@@ -606,14 +624,22 @@ def _git_record(repo: Path) -> dict:
 
 def validate_model_identity(snapshot: str, revision: str, expected_sha256: str) -> dict:
     path = Path(snapshot).resolve()
-    if not path.is_dir() or path.name != revision:
-        raise ValueError("attack surrogate must be a local revision directory named by its revision")
+    if not path.is_dir() or not revision.strip():
+        raise ValueError("attack surrogate snapshot must exist and revision must be nonempty")
     actual, files = model_weight_manifest(path)
     if actual.lower() != expected_sha256.lower():
         raise ValueError("attack surrogate weight SHA-256 mismatch")
     return {"snapshot": str(path), "revision": revision, "weight_sha256": actual,
             "weight_files": files, "auxiliary_files": model_auxiliary_manifest(path),
             "verification": "PINNED_LOCAL_SNAPSHOT"}
+
+
+def validate_transfer_identity(transfer_mode: str, attack_surrogate: dict, victim) -> None:
+    if transfer_mode not in {"black_box", "matched_oracle"}:
+        raise ValueError("unsupported transfer mode")
+    if (transfer_mode == "black_box" and
+            attack_surrogate["weight_sha256"].lower() == victim.weight_sha256.lower()):
+        raise ValueError("black_box transfer requires distinct surrogate and victim compressor weights")
 
 
 def build_manifest(args, compressor, data_path: Path, attack_path: Path,
@@ -661,7 +687,7 @@ def main() -> None:
     parser.add_argument("--compressor", choices=sorted(COMPRESSOR_REGISTRY), default="llmlingua2")
     parser.add_argument("--compressor-snapshot", required=True)
     parser.add_argument("--compressor-revision", required=True)
-    parser.add_argument("--compressor-weight-sha256")
+    parser.add_argument("--compressor-weight-sha256", required=True)
     parser.add_argument("--compression-rate", type=float, default=0.6)
     parser.add_argument("--max-suffix-tokens", type=int, default=32)
     parser.add_argument("--max-input-tokens", type=int, default=512)
@@ -707,9 +733,7 @@ def main() -> None:
             attack_surrogate["weight_sha256"].lower() != local_surrogate["weight_sha256"].lower() or
             attack_surrogate["auxiliary_files"] != local_surrogate["auxiliary_files"]):
         raise ValueError("attack artifact surrogate identity differs from the declared, locally verified snapshot")
-    if (args.transfer_mode == "black_box" and
-            attack_surrogate["weight_sha256"].lower() == compressor.weight_sha256.lower()):
-        raise ValueError("black_box transfer requires distinct surrogate and victim compressor weights")
+    validate_transfer_identity(args.transfer_mode, attack_surrogate, compressor)
     result = run_spc_asr(clean_rows, attack_rows, compressor, backend, judge,
                          suffix_tokenizer=suffix_tokenizer,
                          max_suffix_tokens=args.max_suffix_tokens,

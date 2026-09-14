@@ -11,7 +11,8 @@ from pathlib import Path
 
 from comattack.spc_query_suffix import FORBIDDEN_ARTIFACT_FIELDS, suffix_token_ids
 from comattack.spc_stages import (make_stage_two_artifact, optimize_suffix_checkpoints,
-                                  public_attack_prompt, stage_two_inputs)
+                                  public_attack_prompt, stage_two_inputs,
+                                  validate_stage_one_surrogate_identity)
 from run_spc_asr import (LLMLingua2, load_records, model_auxiliary_manifest,
                          model_weight_manifest)
 
@@ -21,10 +22,22 @@ def target_absent(text: str, target: str) -> bool:
                      flags=re.IGNORECASE) is None
 
 
+def validate_stage1_surrogate_identity(rows: list[dict], surrogate: dict) -> None:
+    """Bind Stage-I compression evidence to the Stage-II surrogate snapshot."""
+    for row in rows:
+        stage1 = row.get("stage1", {})
+        if stage1.get("status") != "COMPLETE":
+            continue
+        validate_stage_one_surrogate_identity(stage1, surrogate)
+
+
 def run_stage2(rows, attacker, tokenizer, compress_at_rate, surrogate,
                *, initial_suffix: str, checkpoint_every: int = 25,
-               max_suffix_tokens: int = 32, max_steps: int = 500) -> list[dict]:
+               max_suffix_tokens: int = 32, max_steps: int = 500,
+               evidence_class: str = "SIMULATED_OR_CUSTOM") -> list[dict]:
     """Run 500 iterative steps, then require removal at all three budgets."""
+    if evidence_class not in {"LIVE_MODEL", "SIMULATED_OR_CUSTOM"}:
+        raise ValueError("unsupported Stage-II evidence class")
     initial_ids = suffix_token_ids(tokenizer, initial_suffix, max_suffix_tokens)
     if not initial_ids:
         raise ValueError("initial suffix produced no tokens")
@@ -41,19 +54,19 @@ def run_stage2(rows, attacker, tokenizer, compress_at_rate, surrogate,
         guardrails = row["stage1"]["surrogate_guardrails"]
         render = lambda suffix: public_attack_prompt(prefix, guardrails, query, suffix)
         clean_trials = []
-        if getattr(attacker, "require_clean_target_retention", False):
-            for rate in (0.5, 0.6, 0.7):
-                compressed = compress_at_rate(render(""), rate)
-                text = compressed.get("text") if isinstance(compressed, dict) else None
-                if not isinstance(text, str):
-                    raise ValueError("Stage-II compressor returned no text")
-                clean_trials.append({"compression_rate": rate,
-                                     "target_retained": not target_absent(text, target_text)})
-            if not all(trial["target_retained"] for trial in clean_trials):
-                results.append({"id": str(row.get("sample_id", "")), "skip": True,
-                                "reason": "target is not retained by clean compression at every budget",
-                                "clean_budget_trials": clean_trials})
-                continue
+        for rate in (0.5, 0.6, 0.7):
+            compressed = compress_at_rate(render(""), rate)
+            text = compressed.get("text") if isinstance(compressed, dict) else None
+            if not isinstance(text, str) or compressed.get("raw") is None:
+                raise ValueError("Stage-II compressor returned no text/raw evidence")
+            clean_trials.append({"compression_rate": rate,
+                                 "target_retained": not target_absent(text, target_text),
+                                 "compressed_text": text, "compressor_raw": compressed["raw"]})
+        if not all(trial["target_retained"] for trial in clean_trials):
+            results.append({"id": str(row.get("sample_id", "")), "skip": True,
+                            "reason": "target is not retained by clean compression at every budget",
+                            "clean_budget_trials": clean_trials})
+            continue
         if hasattr(attacker, "best_loss"):
             attacker.best_loss = float("inf")
         if hasattr(attacker, "best_candidates"):
@@ -79,6 +92,7 @@ def run_stage2(rows, attacker, tokenizer, compress_at_rate, surrogate,
             row, candidates, validate, surrogate, steps_run=steps_run,
             max_suffix_tokens=max_suffix_tokens,
             raw_provenance={"optimizer": type(attacker).__name__,
+                            "evidence_class": evidence_class,
                             "initial_suffix_token_ids": initial_ids,
                             "checkpoint_every": checkpoint_every,
                             "budgets": [0.5, 0.6, 0.7],
@@ -96,6 +110,7 @@ def run_stage2(rows, attacker, tokenizer, compress_at_rate, surrogate,
                             "seed": getattr(getattr(attacker, "config", None), "seed", None)},
         )
         artifact["stage2"]["loss_history"] = loss_history
+        artifact["stage2"]["clean_budget_trials"] = clean_trials
         if not artifact["stage2"]["validated"] and loss_history:
             artifact["stage2"]["best_loss"] = loss_history[-1]["best_objective_loss"]
         leaked = FORBIDDEN_ARTIFACT_FIELDS.intersection(artifact)
@@ -133,7 +148,8 @@ def main() -> None:
     parser.add_argument("--coordinate-width", type=int, choices=(1, 2), default=1,
                         help="mutated suffix coordinates per proposal")
     parser.add_argument("--require-clean-target-retention", action="store_true",
-                        help="skip samples whose clean compression drops the target")
+                        default=True,
+                        help="required: skip samples whose clean compression drops the target")
     args = parser.parse_args()
     if not 1 <= args.max_suffix_tokens <= 32:
         parser.error("--max-suffix-tokens must be between 1 and 32")
@@ -178,12 +194,15 @@ def main() -> None:
     surrogate = {"model": args.surrogate_model, "revision": args.surrogate_revision,
                  "weight_sha256": actual_hash, "weight_files": weight_files,
                  "auxiliary_files": model_auxiliary_manifest(snapshot)}
-    artifacts = run_stage2(load_records(args.stage1_results)[:args.max_items], attacker, tokenizer,
+    stage1_rows = load_records(args.stage1_results)[:args.max_items]
+    validate_stage1_surrogate_identity(stage1_rows, surrogate)
+    artifacts = run_stage2(stage1_rows, attacker, tokenizer,
                            compress_at_rate, surrogate,
                            initial_suffix=args.initial_suffix,
                            checkpoint_every=args.checkpoint_every,
                            max_suffix_tokens=args.max_suffix_tokens,
-                           max_steps=args.max_steps)
+                           max_steps=args.max_steps,
+                           evidence_class="LIVE_MODEL")
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text("".join(json.dumps(row, ensure_ascii=False, default=str) + "\n"

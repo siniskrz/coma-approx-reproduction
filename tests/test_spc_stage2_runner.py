@@ -1,6 +1,6 @@
 import unittest
 
-from run_spc_stage2 import run_stage2, target_absent
+from run_spc_stage2 import run_stage2, target_absent, validate_stage1_surrogate_identity
 
 try:
     import torch
@@ -44,7 +44,7 @@ class Stage2RunnerTest(unittest.TestCase):
                 "critical_occurrences": [occurrence], "selected_target": "must enter",
                 "baseline_label": "NO", "counterfactual_label": "YES",
                 "baseline": {"label": "NO", "backend": backend, "judge": no},
-                "trials": [{"target_prompt": "must enter", "deleted_occurrence": occurrence,
+                "trials": [{"status": "EVALUATED", "target_prompt": "must enter", "deleted_occurrence": occurrence,
                             "outcome": {"label": "YES", "backend": backend, "judge": yes}}]}
 
     @unittest.skipUnless(torch is not None, "requires optional SPC torch dependency")
@@ -150,7 +150,7 @@ class Stage2RunnerTest(unittest.TestCase):
                "surrogate_prefix": "Public rules:",
                "stage1": self.complete_stage1()}
         attacker = Attacker()
-        attacker.require_clean_target_retention = True
+        attacker.require_clean_target_retention = False
         calls = []
 
         def compress(prompt, rate):
@@ -185,7 +185,7 @@ class Stage2RunnerTest(unittest.TestCase):
                     "raw": {}}
 
         attacker = Attacker()
-        attacker.require_clean_target_retention = True
+        attacker.require_clean_target_retention = False
         result = run_stage2(
             [row], attacker, Tokenizer(), compress,
             {"model": "m", "revision": "r", "weight_sha256": "h"},
@@ -213,6 +213,21 @@ class Stage2RunnerTest(unittest.TestCase):
                        lambda prompt, rate: {"text": prompt},
                        {"model": "m", "revision": "r", "weight_sha256": "h"},
                        initial_suffix="xxxx")
+
+    def test_live_stage_one_must_match_stage_two_surrogate(self):
+        stage1 = self.complete_stage1()
+        stage1["raw_provenance"] = {
+            "evidence_class": "LIVE_MODEL_AND_API", "compressor": "LLMLingua2",
+            "compressor_revision": "r", "compressor_weight_sha256": "aa",
+            "compressor_auxiliary_files": {"tokenizer.json": "bb"},
+        }
+        row = {"stage1": stage1}
+        surrogate = {"revision": "r", "weight_sha256": "aa",
+                     "auxiliary_files": {"tokenizer.json": "bb"}}
+        validate_stage1_surrogate_identity([row], surrogate)
+        surrogate["weight_sha256"] = "different"
+        with self.assertRaisesRegex(ValueError, "declared Stage-II surrogate"):
+            validate_stage1_surrogate_identity([row], surrogate)
 
 
 if __name__ == "__main__":

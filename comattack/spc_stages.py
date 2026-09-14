@@ -123,28 +123,51 @@ def validate_stage_one_result(stage1: object) -> None:
     baseline = stage1.get("baseline")
     trials = stage1.get("trials")
     occurrences = stage1.get("critical_occurrences")
+    evaluated = [trial["outcome"] for trial in trials or [] if isinstance(trial, dict)
+                 and trial.get("status") == "EVALUATED" and
+                 isinstance(trial.get("outcome"), dict)]
     successful = [trial for trial in trials or [] if isinstance(trial, dict)
                   and isinstance(trial.get("outcome"), dict)
                   and trial["outcome"].get("label") == "YES"]
     if (stage1.get("baseline_label") != "NO" or
             stage1.get("counterfactual_label") != "YES" or
             not isinstance(baseline, dict) or baseline.get("label") != "NO" or
-            len(successful) != 1 or
+            not evaluated or len(successful) != 1 or
             not isinstance(occurrences, list) or len(occurrences) != 1 or
             stage1.get("selected_target") != successful[0].get("target_prompt") or
             occurrences[0] != successful[0].get("deleted_occurrence")):
         raise ValueError("Stage-I COMPLETE record lacks consistent NO-to-YES evidence")
-    for evidence in (baseline, successful[0]["outcome"]):
+    if evaluated[-1].get("label") != "YES" or any(
+            evidence.get("label") != "NO" for evidence in evaluated[:-1]):
+        raise ValueError("Stage-I COMPLETE record has an invalid trial sequence")
+    for evidence in (baseline, *evaluated):
         if (not isinstance(evidence.get("backend"), dict) or
                 not isinstance(evidence.get("judge"), dict) or
                 evidence["backend"].get("request") is None or
                 evidence["backend"].get("response") is None or
                 evidence["backend"].get("error") is not None or
+                not isinstance(evidence["backend"].get("content"), str) or
+                not evidence["backend"]["content"].strip() or
                 evidence["judge"].get("request") is None or
                 evidence["judge"].get("response") is None or
                 evidence["judge"].get("error") is not None or
                 str(evidence["judge"].get("content", "")).strip().upper() != evidence["label"]):
             raise ValueError("Stage-I COMPLETE record lacks raw backend/Judge evidence")
+
+
+def validate_stage_one_surrogate_identity(stage1: object, surrogate: dict) -> None:
+    """Require live Stage-I compression to use the declared Stage-II snapshot."""
+    validate_stage_one_result(stage1)
+    provenance = stage1.get("raw_provenance")
+    if (not isinstance(provenance, dict) or
+            provenance.get("evidence_class") != "LIVE_MODEL_AND_API" or
+            provenance.get("compressor") != "LLMLingua2" or
+            provenance.get("compressor_revision") != surrogate.get("revision") or
+            str(provenance.get("compressor_weight_sha256", "")).lower() !=
+            str(surrogate.get("weight_sha256", "")).lower() or
+            provenance.get("compressor_auxiliary_files") != surrogate.get("auxiliary_files")):
+        raise ValueError(
+            "completed Stage-I evidence was not produced by the declared Stage-II surrogate")
 
 
 def stage_two_inputs(row: dict) -> tuple[str, str, str, str]:

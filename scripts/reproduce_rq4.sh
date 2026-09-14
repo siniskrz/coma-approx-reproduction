@@ -1,11 +1,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-EXTRA_ARGS=""
-while [[ $# -gt 0 ]]; do
-    EXTRA_ARGS+=" $1"
-    shift
-done
+EXTRA_ARGS=("$@")
 
 mkdir -p results/rq4
 
@@ -13,9 +9,9 @@ mkdir -p results/rq4
 # Case Study 1: VSCode Cline -- Guardrail Corruption
 # =====================================================================
 echo "===== Case Study 1: VSCode Cline ====="
-python case_studies/case_study_cline.py \
+python comattack/case_studies/case_study_cline.py \
     --output results/rq4/case_study_1_cline/ \
-    $EXTRA_ARGS
+    "${EXTRA_ARGS[@]}"
 
 echo ""
 
@@ -23,9 +19,9 @@ echo ""
 # Case Study 2: LangChain + Ollama -- Tool Selection Manipulation
 # =====================================================================
 echo "===== Case Study 2: LangChain + Ollama ====="
-python case_studies/case_study_langchain_ollama.py \
+python comattack/case_studies/case_study_langchain_ollama.py \
     --output results/rq4/case_study_2_langchain/ \
-    $EXTRA_ARGS
+    "${EXTRA_ARGS[@]}"
 
 echo ""
 echo "===== RQ4 reproduction complete ====="

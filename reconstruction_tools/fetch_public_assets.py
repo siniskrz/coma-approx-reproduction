@@ -14,10 +14,12 @@ SOURCES = {
     "leaked-system-prompts": ("https://github.com/jujumilk3/leaked-system-prompts.git", "3afab05da7bbba93d04458e4b44e4239198f69cd"),
     "TheBigPromptLibrary": ("https://github.com/0xeb/TheBigPromptLibrary.git", "cabcdb04b5970211b1b6163d8725ae66bb48c5f0"),
     "system-prompts-and-models-of-ai-tools": ("https://github.com/x1xhlol/system-prompts-and-models-of-ai-tools.git", "1e4203a7d88873c1b37ab2d1c07074fea498c274"),
-    "SystemCheck": ("https://github.com/normster/SystemCheck.git", "ed829f6ac7cd4e09f7161fe7dffbebdd220eb024"),
 }
 MODELS = {
     "llmlingua2": ("microsoft/llmlingua-2-xlm-roberta-large-meetingbank", "ebaba9b0e874dadd3003ffcff828e4397e568089"),
+    # A distinct LLMLingua-2 checkpoint is required for black-box transfer
+    # evaluation; the ASR runner rejects matching surrogate/victim weights.
+    "llmlingua2_victim": ("microsoft/llmlingua-2-bert-base-multilingual-cased-meetingbank", "5f0c82792b7ea14c6484e015b6a072009496b7f2"),
     "llama2_surrogate": ("NousResearch/Llama-2-7b-hf", "8efe6c9b93655b934e27bd9981e3ec13e55aee9d"),
     "qwen3_4b": ("Qwen/Qwen3-4B", "1cfa9a7208912126459214e8b04321603b3df60c"),
 }
@@ -69,7 +71,10 @@ def fetch_models(output: Path) -> list[dict]:
     model_dir.mkdir(parents=True, exist_ok=True)
     records = []
     for name, (repo_id, revision) in MODELS.items():
-        path = Path(snapshot_download(repo_id=repo_id, revision=revision, local_dir=model_dir / name))
+        path = Path(snapshot_download(repo_id=repo_id, revision=revision,
+                                      local_dir=model_dir / name / revision))
+        if path.name != revision:
+            raise RuntimeError(f"snapshot directory mismatch for {repo_id}: {path}")
         weights = sorted(p for p in path.rglob("*") if p.is_file() and p.suffix.lower() in {".safetensors", ".bin", ".pt", ".pth"})
         if not weights:
             raise RuntimeError(f"no model weights found for {repo_id}")
