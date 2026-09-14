@@ -22,8 +22,12 @@ class PublicAssetsTest(unittest.TestCase):
                 (Path(command[-1]) / ".git").mkdir(parents=True)
 
             def fetched_git(repo, *args):
+                if args == ("remote", "get-url", "origin"):
+                    return fetch.SOURCES[repo.name][0]
                 if args == ("rev-parse", "HEAD"):
                     return fetch.SOURCES[repo.name][1]
+                if args == ("rev-parse", "HEAD^{tree}"):
+                    return "tree-" + repo.name
                 return ""
 
             with patch.object(fetch.subprocess, "run", clone), patch.object(fetch, "_git", fetched_git):
@@ -44,7 +48,13 @@ class PublicAssetsTest(unittest.TestCase):
 
             def source_git(repo, *args):
                 source = fetch.SOURCES[repo.name]
-                return source[1] if args == ("rev-parse", "HEAD") else source[0]
+                if args == ("rev-parse", "HEAD"):
+                    return source[1]
+                if args == ("remote", "get-url", "origin"):
+                    return source[0]
+                if args == ("rev-parse", "HEAD^{tree}"):
+                    return "tree-" + repo.name
+                return ""
 
             destination = root / "candidates.json"
             argv = ["build", "--source-root", str(root / "sources"),
@@ -56,6 +66,14 @@ class PublicAssetsTest(unittest.TestCase):
             result = json.loads(destination.read_text(encoding="utf-8"))
             self.assertEqual(len(result["manifest"]), 4)
             self.assertEqual(len(result["candidates"]), 4)
+
+            def dirty_git(repo, *args):
+                return "?? drift.txt" if args == ("status", "--porcelain") else source_git(repo, *args)
+
+            with patch.object(build, "collect", return_value=[candidate]), \
+                    patch.object(build, "git", dirty_git), patch.object(sys, "argv", argv), \
+                    self.assertRaisesRegex(ValueError, "working tree is not clean"):
+                build.main()
 
     def test_model_snapshots_are_named_by_pinned_revision(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -79,6 +97,18 @@ class PublicAssetsTest(unittest.TestCase):
                 self.assertEqual(path.parent.name, record["name"])
                 self.assertEqual(Path(call["local_dir"]), path)
                 self.assertEqual(set(record["weight_files"]), {"model.safetensors"})
+                self.assertEqual(record["snapshot_files"], record["weight_files"])
+                self.assertEqual(record["snapshot_sha256"], fetch._manifest_digest(record["snapshot_files"]))
+
+    def test_multishard_weight_digest_matches_runtime_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "model-00001-of-00002.safetensors").write_bytes(b"one")
+            (root / "model-00002-of-00002.safetensors").write_bytes(b"two")
+            files = sorted(root.glob("*.safetensors"))
+            manifest = fetch._file_manifest(files, root)
+            expected = fetch.hashlib.sha256(json.dumps(manifest, sort_keys=True).encode()).hexdigest()
+            self.assertEqual(fetch._weight_digest(files, root), expected)
 
 
 if __name__ == "__main__":

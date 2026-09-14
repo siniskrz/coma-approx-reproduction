@@ -85,6 +85,7 @@ python reconstruction_tools/transform_four_source_spc.py \
 python prepare_spc_blind_inputs.py \
   --private-data results/spc/transformed/private_samples.json \
   --public-pool results/spc/transformed/public_surrogates.json \
+  --lineage-manifest results/spc/transformed/lineage_manifest.json \
   --output results/spc/blind.jsonl
 
 python run_spc_stage1.py \

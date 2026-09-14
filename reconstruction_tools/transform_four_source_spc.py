@@ -13,6 +13,12 @@ from pathlib import Path
 
 
 KEYWORDS = ("not", "never", "forbidden")
+TRANSFORM_FIELDS = {"prefix", "guardrail_sentence", "keyword", "violation_query", "semantic_class"}
+
+
+def canonical_sha256(value) -> str:
+    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode()).hexdigest()
 
 
 def instruction(source_sentence: str) -> str:
@@ -130,7 +136,7 @@ def deterministic_transform(_model: str, source_sentence: str, candidate_id: str
 
 
 def validate(value: dict) -> dict:
-    expected = {"prefix", "guardrail_sentence", "keyword", "violation_query", "semantic_class"}
+    expected = TRANSFORM_FIELDS
     if set(value) != expected or any(not isinstance(value[key], str) or not value[key].strip()
                                      for key in expected):
         raise ValueError("transformation fields are missing or invalid")
@@ -148,6 +154,58 @@ def validate(value: dict) -> dict:
         raise ValueError("violation query lacks the fixed decision format")
     value["keyword"] = keyword
     return value
+
+
+def validate_source(source: dict) -> str:
+    if not isinstance(source, dict) or set(source) != {
+        "asset_manifest_sha256", "manifest", "candidates"
+    }:
+        raise ValueError("candidate input must be a provenance-bound builder artifact")
+    if not re.fullmatch(r"[0-9a-f]{64}", str(source["asset_manifest_sha256"])):
+        raise ValueError("candidate input has an invalid asset manifest hash")
+    manifest, candidates = source["manifest"], source["candidates"]
+    if not isinstance(manifest, list) or len(manifest) != 4 or any(
+        not isinstance(row, dict) for row in manifest
+    ):
+        raise ValueError("candidate input must contain exactly four source manifests")
+    manifest_by_repo = {row.get("source_repo"): row for row in manifest}
+    if len(manifest_by_repo) != 4 or None in manifest_by_repo:
+        raise ValueError("candidate source manifests are missing or duplicated")
+    if any(not all(row.get(key) for key in ("source_repo", "source_url", "revision", "tree")) or
+           not isinstance(row.get("selected_candidates"), int)
+           for row in manifest):
+        raise ValueError("candidate source manifest identities are incomplete")
+    if not isinstance(candidates, list) or not candidates or any(
+        not isinstance(row, dict) for row in candidates
+    ):
+        raise ValueError("candidate input must contain candidate objects")
+    ids = [row.get("candidate_id") for row in candidates]
+    if any(not isinstance(value, str) or not value for value in ids) or len(set(ids)) != len(ids):
+        raise ValueError("candidate ids are missing or duplicated")
+    grouped = {repo: [] for repo in manifest_by_repo}
+    required = {
+        "candidate_id", "source_repo", "source_url", "source_revision", "source_path",
+        "source_file_sha256", "source_sentence", "keyword", "selection_score",
+    }
+    for row in candidates:
+        if not required.issubset(row) or row["source_repo"] not in grouped:
+            raise ValueError("candidate provenance fields are missing or inconsistent")
+        source_manifest = manifest_by_repo[row["source_repo"]]
+        if (row["source_url"], row["source_revision"]) != (
+            source_manifest.get("source_url"), source_manifest.get("revision")
+        ):
+            raise ValueError(f"candidate provenance mismatch: {row['candidate_id']}")
+        if (not re.fullmatch(r"[0-9a-f]{64}", str(row["source_file_sha256"])) or
+                not isinstance(row["source_sentence"], str) or not row["source_sentence"].strip()):
+            raise ValueError(f"candidate source evidence is invalid: {row['candidate_id']}")
+        grouped[row["source_repo"]].append(row)
+    counts = {repo: len(rows) for repo, rows in grouped.items()}
+    if len(set(counts.values())) != 1 or next(iter(counts.values())) < 2 or next(iter(counts.values())) % 2:
+        raise ValueError(f"four-source candidates must be balanced and even: {counts}")
+    if any(manifest_by_repo[repo].get("selected_candidates") != count
+           for repo, count in counts.items()):
+        raise ValueError("candidate counts differ from the source manifest")
+    return canonical_sha256(source)
 
 
 def write_json(path: Path, value) -> None:
@@ -177,11 +235,40 @@ def main() -> None:
                 ))
 
     source = json.loads(Path(args.input).read_text(encoding="utf-8"))
+    source_sha256 = validate_source(source)
+    backend_identity = ({"kind": "deterministic"} if args.deterministic else
+                        {"kind": "local_transformers", "model_path": str(Path(args.model_path).resolve())}
+                        if args.model_path else
+                        {"kind": "openai_compatible", "url": args.url.rstrip("/")})
+    binding = {"source_candidates_sha256": source_sha256,
+               "transformation_model": args.model, "backend": backend_identity,
+               "transformer_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
     output_dir = Path(args.output_dir)
     checkpoint = output_dir / "transform_checkpoint.json"
-    transformed = {row["candidate_id"]: row for row in (
-        json.loads(checkpoint.read_text(encoding="utf-8")) if checkpoint.exists() else [])
-    }
+    checkpoint_document = (json.loads(checkpoint.read_text(encoding="utf-8"))
+                           if checkpoint.exists() else {"binding": binding, "rows": []})
+    if (not isinstance(checkpoint_document, dict) or checkpoint_document.get("binding") != binding or
+            not isinstance(checkpoint_document.get("rows"), list)):
+        raise ValueError("transform checkpoint is not bound to the current input/model/backend")
+    candidates_by_id = {row["candidate_id"]: row for row in source["candidates"]}
+    transformed = {}
+    provenance_keys = (
+        "source_repo", "source_url", "source_revision", "source_path", "source_file_sha256"
+    )
+    for cached in checkpoint_document["rows"]:
+        candidate_id = cached.get("candidate_id") if isinstance(cached, dict) else None
+        if not isinstance(candidate_id, str) or candidate_id in transformed:
+            raise ValueError("transform checkpoint contains invalid or duplicate rows")
+        candidate = candidates_by_id.get(candidate_id)
+        if candidate is None or any(cached.get(key) != candidate[key] for key in provenance_keys):
+            raise ValueError("transform checkpoint row provenance differs from the current input")
+        if (cached.get("source_sentence_sha256") !=
+                hashlib.sha256(candidate["source_sentence"].encode()).hexdigest() or
+                cached.get("source_keyword") != candidate["keyword"] or
+                cached.get("transformation_model") != args.model):
+            raise ValueError("transform checkpoint row is not bound to its source candidate")
+        validate({key: cached.get(key) for key in TRANSFORM_FIELDS})
+        transformed[candidate_id] = cached
     for row in source["candidates"]:
         candidate_id = row["candidate_id"]
         if candidate_id in transformed:
@@ -207,8 +294,13 @@ def main() -> None:
             "transformation_model": args.model,
             **generated,
         }
-        write_json(checkpoint, list(transformed.values()))
+        write_json(checkpoint, {"binding": binding, "rows": list(transformed.values())})
         print(json.dumps({"done": len(transformed), "candidate_id": candidate_id}))
+
+    if set(transformed) != set(candidates_by_id):
+        raise ValueError("transformed candidate set differs from the input")
+    transformed_sha256 = canonical_sha256(sorted(transformed.values(), key=lambda row: row["candidate_id"]))
+    lineage_sha256 = canonical_sha256({"binding": binding, "transformed_sha256": transformed_sha256})
 
     grouped: dict[str, list[dict]] = {}
     for row in transformed.values():
@@ -225,6 +317,8 @@ def main() -> None:
         for row in rows[:split]:
             private.append({
                 "sample_id": "four-source-" + row["candidate_id"],
+                "lineage_id": row["candidate_id"],
+                "lineage_sha256": lineage_sha256,
                 "system_prompt": row["prefix"] + " " + row["guardrail_sentence"],
                 "guardrail_list": [{"sentence": row["guardrail_sentence"],
                                     "keyword": row["keyword"]}],
@@ -233,6 +327,8 @@ def main() -> None:
         for row in rows[split:]:
             public.append({
                 "pool_id": "four-source-surrogate-" + row["candidate_id"],
+                "lineage_id": row["candidate_id"],
+                "lineage_sha256": lineage_sha256,
                 "surrogate_prefix": row["prefix"],
                 "surrogate_guardrails": [row["guardrail_sentence"]],
                 "surrogate_query": row["violation_query"],
@@ -242,13 +338,23 @@ def main() -> None:
             "prefix", "guardrail_sentence", "violation_query"
         }} for row in rows)
 
-    write_json(output_dir / "private_samples.json", private)
-    write_json(output_dir / "public_surrogates.json", public)
+    private_path = output_dir / "private_samples.json"
+    public_path = output_dir / "public_surrogates.json"
+    write_json(private_path, private)
+    write_json(public_path, public)
     write_json(output_dir / "lineage_manifest.json", {
         "input_manifest": source["manifest"],
+        "asset_manifest_sha256": source["asset_manifest_sha256"],
+        "source_candidates_sha256": source_sha256,
         "transformation_model": args.model,
+        "transformation_backend": backend_identity,
+        "transformer_sha256": binding["transformer_sha256"],
+        "transformed_sha256": transformed_sha256,
+        "lineage_sha256": lineage_sha256,
         "private_count": len(private),
         "public_count": len(public),
+        "private_samples_sha256": hashlib.sha256(private_path.read_bytes()).hexdigest(),
+        "public_surrogates_sha256": hashlib.sha256(public_path.read_bytes()).hexdigest(),
         "rows": lineage,
     })
     print(json.dumps({"private": len(private), "public": len(public), "sources": len(grouped)}))

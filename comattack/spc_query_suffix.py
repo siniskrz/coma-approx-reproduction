@@ -29,6 +29,7 @@ FORBIDDEN_ARTIFACT_FIELDS = {
 BLIND_FIELDS = {
     "sample_id",
     "public_surrogate_id",
+    "lineage_sha256",
     "source_hash",
     "original_query",
     "surrogate_query",
@@ -77,22 +78,56 @@ def _public_text(pool_row: dict) -> str:
     return "\n".join([str(pool_row.get("surrogate_prefix", "")), *map(str, guardrails)])
 
 
+def _lineage_value(row: dict, label: str) -> tuple[str, str]:
+    lineage_id, digest = row.get("lineage_id"), row.get("lineage_sha256")
+    if not isinstance(lineage_id, str) or not lineage_id.strip():
+        raise ValueError(f"{label} row requires a lineage_id")
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError(f"{label} row requires a lowercase lineage SHA-256")
+    return lineage_id, digest
+
+
+def _policy_signature(value: str) -> str:
+    return " ".join(re.findall(r"\w+", value.casefold()))
+
+
 def prepare_blind_inputs(private_rows: list[dict], public_pool: list[dict]) -> list[dict]:
     """Join private provenance hashes to independent public surrogate rules."""
     if not private_rows or not public_pool:
         raise ValueError("private toy rows and public surrogate pool must be non-empty")
+    if len(private_rows) != len(public_pool):
+        raise ValueError("private and public surrogate rows must have equal lengths")
+    private_lineage = [_lineage_value(row, "private") for row in private_rows]
+    public_lineage = [_lineage_value(row, "public") for row in public_pool]
+    if len({item[0] for item in private_lineage}) != len(private_lineage):
+        raise ValueError("private lineage ids must be unique")
+    if len({item[0] for item in public_lineage}) != len(public_lineage):
+        raise ValueError("public lineage ids must be unique")
+    if {item[0] for item in private_lineage}.intersection(item[0] for item in public_lineage):
+        raise ValueError("private and public surrogate rows must be lineage-disjoint")
+    lineage_hashes = {item[1] for item in private_lineage + public_lineage}
+    if len(lineage_hashes) != 1:
+        raise ValueError("private and public rows come from different transformation lineages")
+    pool_ids = [row.get("pool_id") for row in public_pool]
+    if any(not isinstance(value, str) or not value.strip() for value in pool_ids):
+        raise ValueError("public surrogate pool ids are required")
+    if len(set(pool_ids)) != len(pool_ids):
+        raise ValueError("public surrogate pool ids must be unique")
     private_fragments = []
     for row in private_rows:
-        private_fragments.append(str(row.get("system_prompt", "")).strip())
-        private_fragments.extend(
-            str(item.get("sentence", "")).strip()
-            for item in row.get("guardrail_list", [])
-            if isinstance(item, dict)
-        )
-    private_fragments = [text.casefold() for text in private_fragments if len(text) >= 16]
+        if not isinstance(row.get("system_prompt"), str) or not row["system_prompt"].strip():
+            raise ValueError("private row requires a non-empty system_prompt")
+        guardrails = row.get("guardrail_list")
+        if (not isinstance(guardrails, list) or not guardrails or any(
+                not isinstance(item, dict) or not isinstance(item.get("sentence"), str) or
+                not item["sentence"].strip() for item in guardrails)):
+            raise ValueError("private row requires non-empty guardrail sentences")
+        private_fragments.append(_policy_signature(row["system_prompt"]))
+        private_fragments.extend(_policy_signature(item["sentence"]) for item in guardrails)
+    private_fragments = [text for text in private_fragments if text]
 
     for pool_row in public_pool:
-        public_text = _public_text(pool_row).casefold()
+        public_text = _policy_signature(_public_text(pool_row))
         if not public_text.strip():
             raise ValueError("public surrogate pool entries must be non-empty")
         if any(fragment in public_text or public_text in fragment for fragment in private_fragments):
@@ -101,13 +136,10 @@ def prepare_blind_inputs(private_rows: list[dict], public_pool: list[dict]) -> l
     blind = []
     for index, row in enumerate(private_rows):
         public = public_pool[index % len(public_pool)]
-        public_id = public.get("pool_id")
-        if not isinstance(public_id, str) or not public_id.strip():
-            public_id = hashlib.sha256(json.dumps(public, ensure_ascii=False, sort_keys=True,
-                                                  separators=(",", ":")).encode("utf-8")).hexdigest()
         candidate = {
             "sample_id": str(row.get("sample_id", row.get("id", ""))),
-            "public_surrogate_id": public_id,
+            "public_surrogate_id": public["pool_id"],
+            "lineage_sha256": row["lineage_sha256"],
             "source_hash": canonical_source_hash(row),
             "original_query": _query(row),
             "surrogate_query": public.get("surrogate_query"),
@@ -134,6 +166,10 @@ def validate_blind_row(row: dict) -> None:
         raise ValueError("blind row requires sample_id, original_query, and surrogate_query")
     if not isinstance(row["source_hash"], str) or not re.fullmatch(r"[0-9a-f]{64}", row["source_hash"]):
         raise ValueError("blind row source_hash must be lowercase SHA-256")
+    if not isinstance(row["lineage_sha256"], str) or not re.fullmatch(
+        r"[0-9a-f]{64}", row["lineage_sha256"]
+    ):
+        raise ValueError("blind row lineage_sha256 must be lowercase SHA-256")
     for key in ("surrogate_guardrails", "critical_candidates"):
         if not isinstance(row[key], list) or not row[key] or any(
             not isinstance(value, str) or not value.strip() for value in row[key]

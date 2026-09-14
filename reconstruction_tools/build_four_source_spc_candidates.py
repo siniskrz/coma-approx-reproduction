@@ -13,6 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.data_construction.extract_guardrails import extract_guardrail_pairs, read_prompt_from_file
+from reconstruction_tools.fetch_public_assets import SOURCES
 
 
 TEXT_EXTENSIONS = {".md", ".txt", ".json"}
@@ -76,27 +77,38 @@ def main() -> None:
 
     source_root = Path(args.source_root).resolve()
     asset_manifest = source_root.parent / "public_assets_manifest.json"
-    if asset_manifest.is_file():
-        source_records = json.loads(asset_manifest.read_text(encoding="utf-8")).get("sources", [])
-        names = [row.get("name") for row in source_records]
-        if any(not name or Path(name).name != name for name in names):
-            raise ValueError("public asset manifest contains an invalid source name")
-        repositories = sorted(source_root / name for name in names)
-        if any(not (repo / ".git").is_dir() for repo in repositories):
-            raise ValueError("public asset manifest references a missing source repository")
-    else:
-        repositories = sorted(path for path in source_root.iterdir() if (path / ".git").is_dir())
-    if len(repositories) != 4:
-        raise ValueError(f"expected exactly four source repositories, found {len(repositories)}")
+    if not asset_manifest.is_file():
+        raise ValueError("pinned public asset manifest is required")
+    raw_manifest = asset_manifest.read_bytes()
+    document = json.loads(raw_manifest)
+    source_records = document.get("sources") if isinstance(document, dict) else None
+    if not isinstance(source_records, list) or len(source_records) != len(SOURCES):
+        raise ValueError("public asset manifest must contain exactly four sources")
+    by_name = {row.get("name"): row for row in source_records if isinstance(row, dict)}
+    if len(by_name) != len(source_records) or set(by_name) != set(SOURCES):
+        raise ValueError("public asset manifest source names are missing or duplicated")
+    for name, (url, revision) in SOURCES.items():
+        record = by_name[name]
+        if (record.get("url"), record.get("revision")) != (url, revision) or not record.get("tree"):
+            raise ValueError(f"public asset manifest identity mismatch for {name}")
+    repositories = sorted(source_root / name for name in by_name)
+    if any(not (repo / ".git").is_dir() for repo in repositories):
+        raise ValueError("public asset manifest references a missing source repository")
 
     output = []
     manifest = []
     for repo in repositories:
+        record = by_name[repo.name]
+        revision = git(repo, "rev-parse", "HEAD")
+        url = git(repo, "remote", "get-url", "origin")
+        tree = git(repo, "rev-parse", "HEAD^{tree}")
+        if git(repo, "status", "--porcelain"):
+            raise ValueError(f"source working tree is not clean: {repo.name}")
+        if (url, revision, tree) != (record["url"], record["revision"], record["tree"]):
+            raise ValueError(f"source checkout differs from manifest: {repo.name}")
         candidates = collect(repo)
         if len(candidates) < args.per_source:
             raise ValueError(f"{repo.name} produced only {len(candidates)} candidates")
-        revision = git(repo, "rev-parse", "HEAD")
-        url = git(repo, "remote", "get-url", "origin")
         selected = []
         source_paths = set()
         for candidate in candidates:
@@ -114,12 +126,17 @@ def main() -> None:
         licenses = sorted(path.name for path in repo.iterdir()
                           if path.is_file() and path.name.lower().startswith(("license", "copying")))
         manifest.append({"source_repo": repo.name, "source_url": url, "revision": revision,
+                         "tree": tree,
                          "license_files": licenses, "eligible_candidates": len(candidates),
                          "selected_candidates": len(selected)})
 
     destination = Path(args.output)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_text(json.dumps({"manifest": manifest, "candidates": output},
+    destination.write_text(json.dumps({
+        "asset_manifest_sha256": hashlib.sha256(raw_manifest).hexdigest(),
+        "manifest": manifest,
+        "candidates": output,
+    },
                                       ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({"sources": len(manifest), "candidates": len(output),
                       "per_source": args.per_source}, indent=2))

@@ -34,11 +34,18 @@ def _sha256(path: Path) -> str:
 
 
 def _weight_digest(files: list[Path], root: Path) -> str:
-    digest = hashlib.sha256()
-    for path in sorted(files):
-        digest.update(str(path.relative_to(root)).encode("utf-8")); digest.update(b"\0")
-        digest.update(bytes.fromhex(_sha256(path)))
-    return digest.hexdigest()
+    manifest = _file_manifest(files, root)
+    if len(manifest) == 1:
+        return next(iter(manifest.values()))
+    return hashlib.sha256(json.dumps(manifest, sort_keys=True).encode()).hexdigest()
+
+
+def _file_manifest(files: list[Path], root: Path) -> dict[str, str]:
+    return {path.relative_to(root).as_posix(): _sha256(path) for path in sorted(files)}
+
+
+def _manifest_digest(files: dict[str, str]) -> str:
+    return hashlib.sha256(json.dumps(files, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -53,12 +60,18 @@ def fetch_sources(output: Path) -> list[dict]:
         repo = source_dir / name
         if not (repo / ".git").is_dir():
             subprocess.run(["git", "clone", "--filter=blob:none", url, str(repo)], check=True)
+        if _git(repo, "remote", "get-url", "origin") != url:
+            raise RuntimeError(f"source origin mismatch for {name}")
         _git(repo, "fetch", "--depth", "1", "origin", revision)
         _git(repo, "checkout", "--detach", revision)
         actual = _git(repo, "rev-parse", "HEAD")
         if actual != revision:
             raise RuntimeError(f"source revision mismatch for {name}: {actual}")
-        records.append({"name": name, "url": url, "revision": actual, "path": str(repo.resolve())})
+        if _git(repo, "status", "--porcelain"):
+            raise RuntimeError(f"source working tree is not clean for {name}")
+        tree = _git(repo, "rev-parse", "HEAD^{tree}")
+        records.append({"name": name, "url": url, "revision": actual, "tree": tree,
+                        "path": str(repo.resolve())})
     return records
 
 
@@ -71,17 +84,22 @@ def fetch_models(output: Path) -> list[dict]:
     model_dir.mkdir(parents=True, exist_ok=True)
     records = []
     for name, (repo_id, revision) in MODELS.items():
+        expected_path = (model_dir / name / revision).resolve()
         path = Path(snapshot_download(repo_id=repo_id, revision=revision,
-                                      local_dir=model_dir / name / revision))
-        if path.name != revision:
+                                      local_dir=expected_path)).resolve()
+        if path != expected_path:
             raise RuntimeError(f"snapshot directory mismatch for {repo_id}: {path}")
-        weights = sorted(p for p in path.rglob("*") if p.is_file() and p.suffix.lower() in {".safetensors", ".bin", ".pt", ".pth"})
+        weights = sorted(path.glob("*.safetensors")) or sorted(path.glob("pytorch_model*.bin"))
         if not weights:
             raise RuntimeError(f"no model weights found for {repo_id}")
+        files = [p for p in path.rglob("*") if p.is_file() and ".cache" not in p.relative_to(path).parts]
+        snapshot_files = _file_manifest(files, path)
         records.append({"name": name, "repo_id": repo_id, "revision": revision,
                         "path": str(path.resolve()),
                         "weight_sha256": _weight_digest(weights, path),
-                        "weight_files": {str(p.relative_to(path)): _sha256(p) for p in weights}})
+                        "weight_files": _file_manifest(weights, path),
+                        "snapshot_sha256": _manifest_digest(snapshot_files),
+                        "snapshot_files": snapshot_files})
     return records
 
 
