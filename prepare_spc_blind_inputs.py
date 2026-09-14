@@ -25,8 +25,10 @@ def load_rows(path: Path) -> list[dict]:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--private-data", default=str(ROOT / "data" / "four_source_spc_permissions_20260912.json"))
-    parser.add_argument("--public-pool", default=str(ROOT / "data" / "four_source_spc_surrogate_pool_20260912.json"))
+    # Toy SPC inputs are intentionally not bundled; require explicit, freshly
+    # transformed paths instead of retaining defaults to deleted artifacts.
+    parser.add_argument("--private-data", required=True)
+    parser.add_argument("--public-pool", required=True)
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
 
