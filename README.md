@@ -66,14 +66,28 @@ or changes the victim system prompt. At evaluation time, system, context, and
 query share one compression budget. No toy SPC dataset is bundled; construct a
 fresh, provenance-bound dataset from pinned public sources before running ASR.
 
-Install the limited SPC dependencies, pin every local model snapshot and hash,
-and provide API keys only through the named environment variables:
+Install the limited SPC dependencies, then run the five modules in this order.
+No module accepts a trusted victim prompt from the attack path.
+
+| Module | One responsibility | Hard stop before the next module |
+|---|---|---|
+| `fetch_public_assets.py` | Pin sources and both model snapshots | missing revision or hash |
+| `build_four_source_spc_candidates.py` + `transform_four_source_spc.py` | Build a balanced, provenance-bound private/public split | lineage, count, or leakage mismatch |
+| `prepare_spc_blind_inputs.py` | Give the attack only public surrogate text and the query | private-field or lineage mismatch |
+| `run_spc_stage1.py` + `run_spc_stage2.py` | Select a clean three-budget target, then search and validate a suffix | no real three-budget evidence |
+| `run_spc_asr.py` | Bind assets, independent victim, live backend/Judge, and A/B/C/D | any precondition failure; ASR stays `None` |
+
+Provide API keys only through the named environment variables. Take model
+revision/hash placeholders from `public_assets_manifest.json`.
 
 ```bash
 pip install -r requirements-spc.txt
 
+python reconstruction_tools/fetch_public_assets.py \
+  --output results/spc/assets --models
+
 python reconstruction_tools/build_four_source_spc_candidates.py \
-  --source-root /path/to/pinned/source-repos \
+  --source-root results/spc/assets/sources \
   --output results/spc/candidates.json \
   --per-source 8
 
@@ -127,20 +141,18 @@ python run_spc_asr.py \
   --attack-surrogate-snapshot /path/to/pinned/surrogate/snapshot \
   --attack-surrogate-revision SURROGATE_REVISION \
   --attack-surrogate-weight-sha256 SURROGATE_SHA256 \
+  --asset-manifest results/spc/assets/public_assets_manifest.json \
   --backend-url https://example.invalid/v1 --backend-model BACKEND_MODEL \
   --judge-url https://example.invalid/v1 --judge-model JUDGE_MODEL \
   --backend-key-env BACKEND_API_KEY --judge-key-env JUDGE_API_KEY
 ```
 
-Stage II is fixed to 500 optimization steps, a suffix of at most 32
-tokens, and validation at compression rates 0.5, 0.6, and 0.7. `run_spc_asr.py`
-rejects incomplete Stage-I evidence, unvalidated Stage-II candidates, modified
-trusted fields, Stage-I hash mismatches, provenance mismatches, and suffixes over
-the limit. Stage-I candidate deletions are evaluated independently so a later
-candidate cannot inherit an earlier deletion and receive false causal credit. It stores
-raw backend/Judge evidence, maps non-exact labels to `UNKNOWN`, and reports the
-paired A/B/C/D design plus the baseline-stable subset (`A=B=C=NO`). Use
-`--max-items 2` only as a paid-API smoke test.
+Stage II always runs 500 optimization steps and accepts a suffix only when the
+real compressor removes the target at 0.5, 0.6, and 0.7. Proxy loss proposes
+candidates; it never proves success. Each candidate carries its score, cutoff,
+margin, compressed text, and raw compressor output. The final runner accepts
+only a complete A/B/C/D batch whose clean baseline is stable (`A=B=C=NO`);
+otherwise ASR is `None`. Use `--max-items 2` only for a paid-API smoke test.
 
 Run the offline protocol checks with:
 

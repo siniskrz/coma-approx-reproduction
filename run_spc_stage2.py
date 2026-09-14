@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 from comattack.spc_query_suffix import FORBIDDEN_ARTIFACT_FIELDS, suffix_token_ids
-from comattack.spc_stages import (make_stage_two_artifact, optimize_suffix_checkpoints,
+from comattack.spc_stages import (RATES, make_stage_two_artifact, optimize_suffix_checkpoints,
                                   public_attack_prompt, stage_two_inputs,
                                   validate_stage_one_surrogate_identity)
 from run_spc_asr import (LLMLingua2, load_records, model_auxiliary_manifest,
@@ -68,7 +68,7 @@ def run_stage2(rows, attacker, tokenizer, compress_at_rate, surrogate,
         clean_metrics = {item["compression_rate"]: item
                          for item in clean_diagnostics.get("budget_metrics", [])}
         clean_trials = []
-        for rate in (0.5, 0.6, 0.7):
+        for rate in RATES:
             compressed = compress_at_rate(render(""), rate)
             text = compressed.get("text") if isinstance(compressed, dict) else None
             if not isinstance(text, str) or compressed.get("raw") is None:
@@ -108,7 +108,7 @@ def run_stage2(rows, attacker, tokenizer, compress_at_rate, surrogate,
 
         def calibrate(checkpoint: dict) -> dict:
             trials = [{"compression_rate": rate, **validate(checkpoint["suffix"], rate)}
-                      for rate in (0.5, 0.6, 0.7)]
+                      for rate in RATES]
             removed = sum(trial["target_removed"] is True for trial in trials)
             return {"budget_trials": trials, "target_removed_count": removed,
                     "all_rates_removed": removed == len(trials),
@@ -128,7 +128,7 @@ def run_stage2(rows, attacker, tokenizer, compress_at_rate, surrogate,
                             "evidence_class": evidence_class,
                             "initial_suffix_token_ids": initial_ids,
                             "checkpoint_every": checkpoint_every,
-                            "budgets": [0.5, 0.6, 0.7],
+                            "budgets": list(RATES),
                             "proxy_loss_role": "PROPOSAL_ONLY",
                             "validation_decision": "REAL_COMPRESSOR_TARGET_REMOVAL_ALL_BUDGETS",
                             "python_version": sys.version,
@@ -141,7 +141,7 @@ def run_stage2(rows, attacker, tokenizer, compress_at_rate, surrogate,
                             "margin_hinge_weight": getattr(attacker, "margin_hinge_weight", 0.0),
                             "margin_delta": getattr(attacker, "margin_delta", 0.0),
                             "coordinate_width": getattr(attacker, "coordinate_width", 1),
-                            "optimization_rate": getattr(attacker, "compression_rates", (0.5, 0.6, 0.7)),
+                            "optimization_rate": getattr(attacker, "compression_rates", RATES),
                             "seed": getattr(getattr(attacker, "config", None), "seed", None)},
         )
         artifact["stage2"]["loss_history"] = loss_history
@@ -178,7 +178,7 @@ def main() -> None:
     parser.add_argument("--target-loss-weight", type=float, default=0.0)
     parser.add_argument("--margin-hinge-weight", type=float, default=0.0)
     parser.add_argument("--margin-delta", type=float, default=0.0)
-    parser.add_argument("--optimization-rate", type=float, choices=(0.5, 0.6, 0.7),
+    parser.add_argument("--optimization-rate", type=float, choices=RATES,
                         help="budget used by the differentiable optimizer; hard validation remains all three rates")
     parser.add_argument("--coordinate-width", type=int, choices=(1, 2), default=1,
                         help="mutated suffix coordinates per proposal")
@@ -221,7 +221,7 @@ def main() -> None:
                                    tokenizer=validator.compressor.tokenizer,
                                    rank_tokenizer=validator.compressor.oai_tokenizer,
                                    compression_rates=((args.optimization_rate,)
-                                                      if args.optimization_rate else (0.5, 0.6, 0.7)))
+                                                      if args.optimization_rate else RATES))
 
     def compress_at_rate(text: str, rate: float) -> dict:
         return validator.compress_at_rate(text, rate)

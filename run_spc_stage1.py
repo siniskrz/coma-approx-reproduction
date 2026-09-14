@@ -10,7 +10,7 @@ import re
 from pathlib import Path
 
 from comattack.spc_query_suffix import validate_blind_row
-from comattack.spc_stages import select_dropout_target
+from comattack.spc_stages import RATES, select_dropout_target
 from run_spc_asr import LLMLingua2, OpenAICompatible, _call, build_joint_prompt, load_records
 
 
@@ -38,7 +38,7 @@ def run_stage1(rows: list[dict], compressor, backend, judge, *,
         if evidence_class == "LIVE_MODEL_AND_API" and not can_diagnose:
             raise ValueError("live Stage-I requires three-budget target diagnostics")
         clean_compressions = ({rate: compressor.compress_at_rate(joint, rate)
-                               for rate in (0.5, 0.6, 0.7)} if can_diagnose else {})
+                               for rate in RATES} if can_diagnose else {})
         clean_rate = getattr(compressor, "rate", None)
         compressed = (clean_compressions[clean_rate] if clean_rate in clean_compressions
                       else compressor.compress(joint))
@@ -123,7 +123,7 @@ def main() -> None:
     parser.add_argument("--compressor-snapshot", required=True)
     parser.add_argument("--compressor-revision", required=True)
     parser.add_argument("--compressor-weight-sha256", required=True)
-    parser.add_argument("--compression-rate", type=float, choices=(0.5, 0.6, 0.7), default=0.6)
+    parser.add_argument("--compression-rate", type=float, choices=RATES, default=0.6)
     parser.add_argument("--backend-url", required=True)
     parser.add_argument("--backend-model", required=True)
     parser.add_argument("--backend-key-env", default="SURROGATE_BACKEND_API_KEY")
