@@ -737,6 +737,41 @@ def validate_model_identity(snapshot: str, revision: str, expected_sha256: str) 
             "verification": "PINNED_LOCAL_SNAPSHOT"}
 
 
+def validate_asset_manifest_model(manifest_path: str | Path, asset_name: str,
+                                  snapshot: str | Path, revision: str,
+                                  weight_sha256: str, weight_files: dict[str, str]) -> dict:
+    """Bind a declared revision to the fetched snapshot and every local file."""
+    path = Path(manifest_path).resolve()
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    models = manifest.get("models") if isinstance(manifest, dict) else None
+    matches = [item for item in models or []
+               if isinstance(item, dict) and item.get("name") == asset_name]
+    if len(matches) != 1:
+        raise ValueError(f"asset manifest needs exactly one model named {asset_name!r}")
+    record = matches[0]
+    root = Path(snapshot).resolve()
+    if (record.get("revision") != revision or
+            Path(str(record.get("path", ""))).resolve() != root or
+            str(record.get("weight_sha256", "")).casefold() != weight_sha256.casefold() or
+            record.get("weight_files") != weight_files):
+        raise ValueError(f"asset manifest identity mismatch for {asset_name}")
+    expected_files = record.get("snapshot_files")
+    if not isinstance(expected_files, dict) or not expected_files:
+        raise ValueError(f"asset manifest lacks snapshot file hashes for {asset_name}")
+    current_files = {}
+    for item in sorted(root.rglob("*")):
+        relative = item.relative_to(root)
+        if item.is_file() and ".cache" not in relative.parts:
+            name = relative.as_posix()
+            current_files[name] = (weight_files[name] if name in weight_files
+                                   else sha256_file(item))
+    digest = hashlib.sha256(json.dumps(
+        current_files, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    if current_files != expected_files or record.get("snapshot_sha256") != digest:
+        raise ValueError(f"asset manifest snapshot hashes mismatch for {asset_name}")
+    return {"manifest_path": str(path), "manifest_sha256": sha256_file(path), **record}
+
+
 def validate_transfer_identity(transfer_mode: str, attack_surrogate: dict, victim) -> None:
     if transfer_mode not in {"black_box", "matched_oracle"}:
         raise ValueError("unsupported transfer mode")
@@ -759,6 +794,8 @@ def build_manifest(args, compressor, data_path: Path, attack_path: Path,
         "inputs": {
             "data": {"path": str(data_path.resolve()), "sha256": sha256_file(data_path)},
             "attack_results": {"path": str(attack_path.resolve()), "sha256": sha256_file(attack_path)},
+            "asset_manifest": {"path": str(Path(args.asset_manifest).resolve()),
+                               "sha256": sha256_file(args.asset_manifest)},
         },
         "code": {**_git_record(Path(__file__).resolve().parent),
                  "runner_sha256": sha256_file(__file__)},
@@ -793,6 +830,7 @@ def main() -> None:
     parser.add_argument("--compressor-snapshot", required=True)
     parser.add_argument("--compressor-revision", required=True)
     parser.add_argument("--compressor-weight-sha256", required=True)
+    parser.add_argument("--compressor-asset-name", default="llmlingua2_victim")
     parser.add_argument("--compression-rate", type=float, default=0.6)
     parser.add_argument("--max-suffix-tokens", type=int, default=32)
     parser.add_argument("--max-input-tokens", type=int, default=512)
@@ -802,6 +840,9 @@ def main() -> None:
                         help="local pinned snapshot for tokenizer and hash verification")
     parser.add_argument("--attack-surrogate-revision", required=True)
     parser.add_argument("--attack-surrogate-weight-sha256", required=True)
+    parser.add_argument("--attack-surrogate-asset-name", default="llmlingua2")
+    parser.add_argument("--asset-manifest", required=True,
+                        help="public_assets_manifest.json that pins both model snapshots")
     parser.add_argument("--backend-url", required=True)
     parser.add_argument("--backend-model", required=True)
     parser.add_argument("--backend-key-env", default="BACKEND_API_KEY")
@@ -828,6 +869,13 @@ def main() -> None:
         args.attack_surrogate_weight_sha256)
     compressor = load_compressor(args.compressor, args.compressor_snapshot, args.compressor_revision,
                                  args.compression_rate, args.compressor_weight_sha256)
+    validate_asset_manifest_model(
+        args.asset_manifest, args.compressor_asset_name, args.compressor_snapshot,
+        args.compressor_revision, compressor.weight_sha256, compressor.weight_files)
+    validate_asset_manifest_model(
+        args.asset_manifest, args.attack_surrogate_asset_name, args.attack_surrogate_snapshot,
+        args.attack_surrogate_revision, local_surrogate["weight_sha256"],
+        local_surrogate["weight_files"])
     from transformers import AutoTokenizer
     suffix_tokenizer = AutoTokenizer.from_pretrained(
         args.attack_surrogate_snapshot, local_files_only=True, use_fast=True)

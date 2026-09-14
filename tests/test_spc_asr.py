@@ -10,7 +10,7 @@ from run_spc_asr import (ATTACK_PROTOCOL, LLMLingua2, OpenAICompatible, _call,
                          _live_runtime_precondition, attack_surrogate_identity, build_joint_prompt,
                          parse_judge_label, run_spc_asr, sample_id, source_hash,
                          summarize_human_reviews, validate_model_identity,
-                         validate_transfer_identity)
+                         validate_asset_manifest_model, validate_transfer_identity)
 from comattack.spc_stages import record_sha256
 
 
@@ -166,6 +166,36 @@ class SPCASRTest(unittest.TestCase):
             identity = validate_model_identity(directory, "upstream-revision", digest)
             self.assertEqual(identity["revision"], "upstream-revision")
             self.assertEqual(identity["weight_sha256"], digest)
+
+    def test_asset_manifest_binds_revision_path_and_every_snapshot_file(self):
+        import hashlib
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot = root / "models" / "victim" / "revision"
+            snapshot.mkdir(parents=True)
+            (snapshot / "model.safetensors").write_bytes(b"weights")
+            (snapshot / "config.json").write_bytes(b"config")
+            files = {item.name: hashlib.sha256(item.read_bytes()).hexdigest()
+                     for item in snapshot.iterdir()}
+            snapshot_digest = hashlib.sha256(json.dumps(
+                files, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            manifest = root / "public_assets_manifest.json"
+            manifest.write_text(json.dumps({"models": [{
+                "name": "victim", "revision": "revision", "path": str(snapshot),
+                "weight_sha256": files["model.safetensors"],
+                "weight_files": {"model.safetensors": files["model.safetensors"]},
+                "snapshot_files": files, "snapshot_sha256": snapshot_digest,
+            }]}), encoding="utf-8")
+            identity = validate_asset_manifest_model(
+                manifest, "victim", snapshot, "revision",
+                files["model.safetensors"],
+                {"model.safetensors": files["model.safetensors"]})
+            self.assertEqual(identity["revision"], "revision")
+            with self.assertRaisesRegex(ValueError, "identity mismatch"):
+                validate_asset_manifest_model(
+                    manifest, "victim", snapshot, "self-reported-revision",
+                    files["model.safetensors"],
+                    {"model.safetensors": files["model.safetensors"]})
 
     def test_black_box_requires_independent_victim_weights(self):
         victim = type("Victim", (), {"weight_sha256": "aa"})()
