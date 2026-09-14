@@ -40,11 +40,22 @@ class Stage2RunnerTest(unittest.TestCase):
         no = {"request": {}, "response": {}, "content": "NO", "error": None}
         yes = {"request": {}, "response": {}, "content": "YES", "error": None}
         occurrence = {"text": "not", "start": 5, "end": 8}
+        diagnostics = {"all_rates_retained": True, "target_keep_score": 0.51,
+                       "cutoff_distance": 0.01,
+                       "budget_trials": [
+                           {"compression_rate": rate, "target_retained": True,
+                            "score": 0.51, "cutoff": 0.5, "margin": 0.01,
+                            "compressed_text": "must not enter", "compressor_raw": {}}
+                           for rate in (0.5, 0.6, 0.7)]}
         return {"status": "COMPLETE", "surrogate_guardrails": ["must not enter"],
                 "critical_occurrences": [occurrence], "selected_target": "must enter",
                 "baseline_label": "NO", "counterfactual_label": "YES",
                 "baseline": {"label": "NO", "backend": backend, "judge": no},
-                "trials": [{"status": "EVALUATED", "target_prompt": "must enter", "deleted_occurrence": occurrence,
+                "selection": {"policy": "closest_cutoff_among_clean_three_budget_no_to_yes_flips",
+                              "candidate": "not", "cutoff_distance": 0.01},
+                "trials": [{"candidate": "not", "status": "EVALUATED",
+                            "diagnostics": diagnostics,
+                            "target_prompt": "must enter", "deleted_occurrence": occurrence,
                             "outcome": {"label": "YES", "backend": backend, "judge": yes}}]}
 
     @unittest.skipUnless(torch is not None, "requires optional SPC torch dependency")
@@ -144,7 +155,7 @@ class Stage2RunnerTest(unittest.TestCase):
         self.assertEqual(attacker._rank_token_count(["▁forbi", "dden"]), 3)
         self.assertEqual(seen, ["▁forbidden"])
 
-    def test_runs_500_steps_updates_prompt_and_validates_three_budgets(self):
+    def test_real_three_budget_removal_calibrates_search_and_records_diagnostics(self):
         row = {"sample_id": "toy", "source_hash": "a" * 64,
                "original_query": "May it enter?", "surrogate_query": "May the public token enter?",
                "surrogate_prefix": "Public rules:",
@@ -158,15 +169,26 @@ class Stage2RunnerTest(unittest.TestCase):
             text = prompt.replace("not", "") if "xxxxx xxxxxx" in prompt else prompt
             return {"text": text, "raw": {"rate": rate}}
 
+        def diagnose(prompt, target, sentence):
+            del prompt, target, sentence
+            return {"target_keep_score": 0.2,
+                    "budget_metrics": [{"compression_rate": rate,
+                                        "cutoff": 0.3, "margin": -0.1}
+                                       for rate in (0.5, 0.6, 0.7)]}
+
         result = run_stage2([row], attacker, Tokenizer(), compress,
                             {"model": "m", "revision": "r", "weight_sha256": "h"},
-                            initial_suffix="xxxx xxxxxx")[0]
+                            initial_suffix="xxxx xxxxxx", diagnose_target=diagnose)[0]
         self.assertEqual(attacker.calls, 500)
-        self.assertNotEqual(attacker.prompts[0], attacker.prompts[1])
         self.assertEqual(calls, [0.5, 0.6, 0.7] * 2)
         self.assertTrue(result["stage2"]["validated"])
         self.assertEqual(len(result["stage2"]["loss_history"]), 500)
         self.assertEqual(result["stage2"]["loss_history"][-1]["margin_0.7"], 0.05)
+        selected = result["stage2"]["selected"]
+        self.assertEqual(selected["actual_validation"]["decision_source"],
+                         "REAL_COMPRESSOR_TARGET_REMOVAL")
+        self.assertTrue(all({"score", "cutoff", "margin", "compressed_text"} <= set(trial)
+                            for trial in selected["budget_trials"]))
         self.assertEqual(result["suffix_token_count"], 2)
         self.assertNotIn("system_prompt", result)
 

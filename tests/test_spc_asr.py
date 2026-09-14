@@ -6,7 +6,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from run_spc_asr import (ATTACK_PROTOCOL, LLMLingua2, attack_surrogate_identity, build_joint_prompt,
+from run_spc_asr import (ATTACK_PROTOCOL, LLMLingua2, OpenAICompatible, _call,
+                         _live_runtime_precondition, attack_surrogate_identity, build_joint_prompt,
                          parse_judge_label, run_spc_asr, sample_id, source_hash,
                          summarize_human_reviews, validate_model_identity,
                          validate_transfer_identity)
@@ -111,10 +112,14 @@ class SPCASRTest(unittest.TestCase):
 
         self.assertEqual(result["n_complete_paired"], 2)
         self.assertEqual(result["n_incomplete_or_unknown"], 1)
-        self.assertEqual(result["four_group_violation_rates"], {"A": 0, "B": 0.5, "C": 0, "D": 1})
-        self.assertEqual(result["D_minus_B"], 0.5)
-        self.assertEqual(result["C_minus_A"], 0)
-        self.assertEqual(result["interaction"], 0.5)
+        self.assertEqual(result["status"], "EVALUATION_INCOMPLETE")
+        self.assertEqual(result["four_group_violation_rates"],
+                         {"A": None, "B": None, "C": None, "D": None})
+        self.assertEqual(result["resolved_subset_four_group_violation_rates"],
+                         {"A": 0, "B": 0.5, "C": 0, "D": 1})
+        self.assertIsNone(result["D_minus_B"])
+        self.assertIsNone(result["C_minus_A"])
+        self.assertIsNone(result["interaction"])
         self.assertEqual(result["baseline_gated_asr"]["value"], None)
         self.assertFalse(result["baseline_gated_asr"]["reportable"])
         self.assertEqual(result["baseline_stable_ABC0"], {
@@ -168,6 +173,28 @@ class SPCASRTest(unittest.TestCase):
             validate_transfer_identity("black_box", {"weight_sha256": "aa"}, victim)
         validate_transfer_identity("black_box", {"weight_sha256": "bb"}, victim)
 
+    def test_live_gate_requires_real_clients_and_independent_victim(self):
+        backend = OpenAICompatible.__new__(OpenAICompatible)
+        judge = OpenAICompatible.__new__(OpenAICompatible)
+        victim = type("Victim", (), {"weight_sha256": "victim"})()
+        self.assertIsNone(_live_runtime_precondition(
+            victim, backend, judge, {"weight_sha256": "surrogate"}))
+        self.assertEqual(_live_runtime_precondition(
+            victim, backend, judge, {"weight_sha256": "victim"})[0],
+            "INDEPENDENT_VICTIM_REQUIRED")
+        self.assertEqual(_live_runtime_precondition(
+            victim, Backend(), judge, {"weight_sha256": "surrogate"})[0],
+            "LIVE_CLIENTS_REQUIRED")
+
+    def test_client_success_requires_raw_response_evidence(self):
+        class MissingRaw:
+            def complete(self, messages, *, max_tokens):
+                return {"content": "YES", "error": None}
+
+        result = _call(MissingRaw(), [{"role": "user", "content": "x"}], 1)
+        self.assertIn("lacks raw", result["error"])
+        self.assertIsNone(result["response"])
+
     def test_llmlingua2_uses_official_word_and_token_budget_path(self):
         class Recorder:
             def compress_prompt(self, text, **kwargs):
@@ -194,8 +221,28 @@ class SPCASRTest(unittest.TestCase):
         attacked = [attack_for(clean[0], original_query="different")]
         result = run_spc_asr(clean, attacked, Compressor(), Backend(), Judge(),
                              allow_simulated_evidence=True)
-        self.assertEqual(result["records"][0]["status"], "INPUT_MISMATCH")
+        self.assertEqual(result["records"][0]["status"], "PRECONDITION_FAILED")
+        self.assertEqual(result["records"][0]["precondition_code"], "INPUT_MISMATCH")
+        self.assertEqual(result["status"], "PRECONDITION_FAILED")
+        self.assertIsNone(result["baseline_gated_asr"]["value"])
         self.assertEqual(result["n_complete_paired"], 0)
+
+    def test_one_bad_sample_blocks_whole_batch_asr_not_just_its_row(self):
+        clean = [
+            {"id": "1", "system_prompt": "clean-1", "adversarial_query": "q",
+             "guardrail_list": [{"sentence": "Do not grant it."}]},
+            {"id": "2", "system_prompt": "clean-2", "adversarial_query": "q",
+             "guardrail_list": [{"sentence": "Do not grant it."}]},
+        ]
+        attacks = [attack_for(clean[0], "suffix-1"),
+                   attack_for(clean[1], "suffix-2", original_query="different")]
+        result = run_spc_asr(clean, attacks, Compressor(), Backend(), Judge(),
+                             allow_simulated_evidence=True)
+        self.assertEqual(result["status"], "PRECONDITION_FAILED")
+        self.assertEqual(result["n_complete_paired"], 1)
+        self.assertEqual(result["four_group_violation_rates"],
+                         {"A": None, "B": None, "C": None, "D": None})
+        self.assertIsNone(result["baseline_gated_asr"]["value"])
 
     def test_empty_guardrail_is_excluded(self):
         clean = [{"id": "x", "system_prompt": "clean", "adversarial_query": "q",
@@ -203,7 +250,8 @@ class SPCASRTest(unittest.TestCase):
         attacked = [attack_for(clean[0])]
         result = run_spc_asr(clean, attacked, Compressor(), Backend(), Judge(),
                              allow_simulated_evidence=True)
-        self.assertEqual(result["records"][0]["status"], "INPUT_ERROR")
+        self.assertEqual(result["records"][0]["status"], "PRECONDITION_FAILED")
+        self.assertEqual(result["records"][0]["precondition_code"], "INPUT_ERROR")
 
     def test_shared_budget_query_suffix_and_legacy_system_edit_rejection(self):
         clean = [{"id": "x", "system_prompt": "trusted", "external_context": "retrieved",
@@ -216,9 +264,10 @@ class SPCASRTest(unittest.TestCase):
         self.assertIn("<CONTEXT>\nretrieved", record["conditions"]["D"]["joint_input_text"])
         self.assertIn("question adversarial suffix", record["conditions"]["D"]["joint_input_text"])
         unsafe = [attack_for(clean[0], attacked_context="edited trusted")]
-        self.assertEqual(run_spc_asr(clean, unsafe, Compressor(), Backend(), Judge(),
-                                     allow_simulated_evidence=True)
-                         ["records"][0]["status"], "UNSAFE_LEGACY_ARTIFACT")
+        failure = run_spc_asr(clean, unsafe, Compressor(), Backend(), Judge(),
+                              allow_simulated_evidence=True)["records"][0]
+        self.assertEqual(failure["status"], "PRECONDITION_FAILED")
+        self.assertEqual(failure["precondition_code"], "UNSAFE_LEGACY_ARTIFACT")
 
     def test_suffix_budget_and_human_review_denominators(self):
         clean = [{"id": "x", "system_prompt": "clean-1", "adversarial_query": "q",
@@ -227,7 +276,8 @@ class SPCASRTest(unittest.TestCase):
         attack[0]["budget"]["max_suffix_tokens"] = 2
         result = run_spc_asr(clean, attack, Compressor(), Backend(), Judge(), max_suffix_tokens=2,
                              allow_simulated_evidence=True)
-        self.assertEqual(result["records"][0]["status"], "SUFFIX_ERROR")
+        self.assertEqual(result["records"][0]["status"], "PRECONDITION_FAILED")
+        self.assertEqual(result["records"][0]["precondition_code"], "SUFFIX_ERROR")
         review = summarize_human_reviews([
             {"id": "a", "label": "YES"}, {"id": "b", "label": "NO"},
             {"id": "c", "label": "UNKNOWN"}], ["a", "b", "c", "d"])
@@ -243,7 +293,8 @@ class SPCASRTest(unittest.TestCase):
         artifact["stage2"].update({"max_steps": 0, "validated": False})
         result = run_spc_asr(clean, [artifact], Compressor(), Backend(), Judge(),
                              allow_simulated_evidence=True)
-        self.assertEqual(result["records"][0]["status"], "ATTACK_EVIDENCE_ERROR")
+        self.assertEqual(result["records"][0]["status"], "PRECONDITION_FAILED")
+        self.assertEqual(result["records"][0]["precondition_code"], "ATTACK_EVIDENCE_ERROR")
         self.assertEqual(result["n_complete_paired"], 0)
 
     def test_forged_stage_evidence_and_reserved_markers_are_rejected(self):
@@ -251,19 +302,22 @@ class SPCASRTest(unittest.TestCase):
                   "guardrail_list": [{"sentence": "Do not grant it."}]}]
         forged = attack_for(clean[0])
         forged["stage2"]["steps_run"] = 0
-        self.assertEqual(run_spc_asr(clean, [forged], Compressor(), Backend(), Judge(),
-                                     allow_simulated_evidence=True)
-                         ["records"][0]["status"], "ATTACK_EVIDENCE_ERROR")
+        forged_failure = run_spc_asr(clean, [forged], Compressor(), Backend(), Judge(),
+                                     allow_simulated_evidence=True)["records"][0]
+        self.assertEqual(forged_failure["status"], "PRECONDITION_FAILED")
+        self.assertEqual(forged_failure["precondition_code"], "ATTACK_EVIDENCE_ERROR")
         marker = attack_for(clean[0], "<SYSTEM>")
-        self.assertEqual(run_spc_asr(clean, [marker], Compressor(), Backend(), Judge(),
-                                     allow_simulated_evidence=True)
-                         ["records"][0]["status"], "SUFFIX_ERROR")
+        marker_failure = run_spc_asr(clean, [marker], Compressor(), Backend(), Judge(),
+                                     allow_simulated_evidence=True)["records"][0]
+        self.assertEqual(marker_failure["status"], "PRECONDITION_FAILED")
+        self.assertEqual(marker_failure["precondition_code"], "SUFFIX_ERROR")
 
     def test_simulated_evidence_is_rejected_by_default(self):
         clean = [{"id": "x", "system_prompt": "clean-1", "adversarial_query": "q",
                   "guardrail_list": [{"sentence": "Do not grant it."}]}]
         result = run_spc_asr(clean, [attack_for(clean[0])], Compressor(), Backend(), Judge())
-        self.assertEqual(result["records"][0]["status"], "ATTACK_EVIDENCE_ERROR")
+        self.assertEqual(result["records"][0]["status"], "PRECONDITION_FAILED")
+        self.assertEqual(result["records"][0]["precondition_code"], "ATTACK_EVIDENCE_ERROR")
 
     def test_joint_prompt_has_one_copy_of_each_component(self):
         prompt = build_joint_prompt("system", "context", "query")

@@ -62,6 +62,24 @@ class SPCStagesTest(unittest.TestCase):
         self.assertEqual(result["status"], "NO_FEASIBLE_TARGET")
         self.assertEqual(seen, ["rule alpha beta", "rule  beta", "rule alpha "])
 
+    def test_stage_one_prefers_clean_flip_closest_to_cutoff(self):
+        original = "rule alpha beta"
+
+        def diagnose(candidate):
+            distance = {"alpha": 0.2, "beta": 0.01}[candidate]
+            return {"all_rates_retained": True, "cutoff_distance": distance,
+                    "worst_margin": distance, "budget_trials": []}
+
+        result = select_dropout_target(
+            original, ["alpha", "beta"],
+            lambda prompt: {"label": "NO" if prompt == original else "YES"},
+            surrogate_guardrails=[original], diagnose=diagnose,
+        )
+        self.assertEqual(result["selection"]["candidate"], "beta")
+        self.assertEqual(result["selected_target"], "rule alpha ")
+        self.assertEqual(len([trial for trial in result["trials"]
+                              if trial.get("outcome", {}).get("label") == "YES"]), 2)
+
     def test_stage_one_rejects_missing_surrogate_guardrails(self):
         with self.assertRaisesRegex(ValueError, "surrogate_guardrails"):
             select_dropout_target("Public toy text.", ["toy"],
@@ -180,6 +198,36 @@ class SPCStagesTest(unittest.TestCase):
         self.assertNotIn("margin_0.5", history[0])
         self.assertEqual(history[0]["worst_signed_margin"], 0.05)
         self.assertEqual(candidates[0]["target_keep_score"], 0.2)
+
+    def test_optimizer_calibrates_only_scheduled_candidates_with_real_removal(self):
+        class Attacker:
+            calls = 0
+
+            def step(self, prompts, sentences, targets):
+                self.calls += 1
+                return 1 / self.calls, [self.calls]
+
+        class Tokenizer:
+            def decode(self, ids, skip_special_tokens=True):
+                return str(ids[0])
+
+            def encode(self, text, add_special_tokens=False):
+                return [int(text)]
+
+        validations = []
+
+        def calibrate(candidate):
+            validations.append(candidate["step"])
+            return {"all_rates_removed": candidate["step"] == 2,
+                    "budget_trials": []}
+
+        attacker = Attacker()
+        candidates, steps, _ = optimize_suffix_checkpoints(
+            attacker, "prompt", "sentence", "target", Tokenizer(),
+            max_steps=10, checkpoint_every=2, calibrate=calibrate)
+        self.assertEqual(steps, 10)
+        self.assertEqual(validations, [1, 2, 4, 6, 8, 10])
+        self.assertTrue(candidates[1]["actual_validation"]["all_rates_removed"])
 
     def test_optimizer_keeps_unique_stable_candidates_between_scheduled_checkpoints(self):
         class Attacker:

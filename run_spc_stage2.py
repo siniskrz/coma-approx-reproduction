@@ -34,10 +34,13 @@ def validate_stage1_surrogate_identity(rows: list[dict], surrogate: dict) -> Non
 def run_stage2(rows, attacker, tokenizer, compress_at_rate, surrogate,
                *, initial_suffix: str, checkpoint_every: int = 25,
                max_suffix_tokens: int = 32, max_steps: int = 500,
+               diagnose_target=None,
                evidence_class: str = "SIMULATED_OR_CUSTOM") -> list[dict]:
     """Run 500 iterative steps, then require removal at all three budgets."""
     if evidence_class not in {"LIVE_MODEL", "SIMULATED_OR_CUSTOM"}:
         raise ValueError("unsupported Stage-II evidence class")
+    if evidence_class == "LIVE_MODEL" and diagnose_target is None:
+        raise ValueError("live Stage-II requires target score/cutoff diagnostics")
     initial_ids = suffix_token_ids(tokenizer, initial_suffix, max_suffix_tokens)
     if not initial_ids:
         raise ValueError("initial suffix produced no tokens")
@@ -53,14 +56,29 @@ def run_stage2(rows, attacker, tokenizer, compress_at_rate, surrogate,
         prefix, query, target_sentence, target_text = stage_two_inputs(row)
         guardrails = row["stage1"]["surrogate_guardrails"]
         render = lambda suffix: public_attack_prompt(prefix, guardrails, query, suffix)
+        diagnostic_cache = {}
+
+        def diagnostics(suffix: str) -> dict:
+            if suffix not in diagnostic_cache:
+                diagnostic_cache[suffix] = (diagnose_target(
+                    render(suffix), target_text, target_sentence) if diagnose_target else {})
+            return diagnostic_cache[suffix]
+
+        clean_diagnostics = diagnostics("")
+        clean_metrics = {item["compression_rate"]: item
+                         for item in clean_diagnostics.get("budget_metrics", [])}
         clean_trials = []
         for rate in (0.5, 0.6, 0.7):
             compressed = compress_at_rate(render(""), rate)
             text = compressed.get("text") if isinstance(compressed, dict) else None
             if not isinstance(text, str) or compressed.get("raw") is None:
                 raise ValueError("Stage-II compressor returned no text/raw evidence")
+            metric = clean_metrics.get(rate, {})
             clean_trials.append({"compression_rate": rate,
                                  "target_retained": not target_absent(text, target_text),
+                                 **({"score": clean_diagnostics["target_keep_score"],
+                                     "cutoff": metric["cutoff"],
+                                     "margin": metric["margin"]} if metric else {}),
                                  "compressed_text": text, "compressor_raw": compressed["raw"]})
         if not all(trial["target_retained"] for trial in clean_trials):
             results.append({"id": str(row.get("sample_id", "")), "skip": True,
@@ -73,20 +91,35 @@ def run_stage2(rows, attacker, tokenizer, compress_at_rate, surrogate,
             attacker.best_candidates = None
         if hasattr(attacker, "best_metrics"):
             attacker.best_metrics = None
-        candidates, steps_run, loss_history = optimize_suffix_checkpoints(
-            attacker, render(initial_suffix), target_sentence, target_text, tokenizer,
-            max_steps=max_steps, checkpoint_every=checkpoint_every,
-            max_suffix_tokens=max_suffix_tokens, render_prompt=render,
-        )
-
         def validate(suffix: str, rate: float) -> dict:
             prompt = render(suffix)
             compressed = compress_at_rate(prompt, rate)
             text = compressed.get("text") if isinstance(compressed, dict) else None
-            if not isinstance(text, str):
-                raise ValueError("Stage-II compressor returned no text")
+            if not isinstance(text, str) or compressed.get("raw") is None:
+                raise ValueError("Stage-II compressor returned no text/raw evidence")
+            model = diagnostics(suffix)
+            metric = next((item for item in model.get("budget_metrics", [])
+                           if item["compression_rate"] == rate), None)
             return {"target_removed": target_absent(text, target_text),
+                    **({"score": model["target_keep_score"],
+                        "cutoff": metric["cutoff"],
+                        "margin": metric["margin"]} if metric else {}),
                     "compressed_text": text, "compressor_raw": compressed.get("raw")}
+
+        def calibrate(checkpoint: dict) -> dict:
+            trials = [{"compression_rate": rate, **validate(checkpoint["suffix"], rate)}
+                      for rate in (0.5, 0.6, 0.7)]
+            removed = sum(trial["target_removed"] is True for trial in trials)
+            return {"budget_trials": trials, "target_removed_count": removed,
+                    "all_rates_removed": removed == len(trials),
+                    "decision_source": "REAL_COMPRESSOR_TARGET_REMOVAL"}
+
+        candidates, steps_run, loss_history = optimize_suffix_checkpoints(
+            attacker, render(initial_suffix), target_sentence, target_text, tokenizer,
+            max_steps=max_steps, checkpoint_every=checkpoint_every,
+            max_suffix_tokens=max_suffix_tokens, render_prompt=render,
+            calibrate=calibrate,
+        )
 
         artifact = make_stage_two_artifact(
             row, candidates, validate, surrogate, steps_run=steps_run,
@@ -96,6 +129,8 @@ def run_stage2(rows, attacker, tokenizer, compress_at_rate, surrogate,
                             "initial_suffix_token_ids": initial_ids,
                             "checkpoint_every": checkpoint_every,
                             "budgets": [0.5, 0.6, 0.7],
+                            "proxy_loss_role": "PROPOSAL_ONLY",
+                            "validation_decision": "REAL_COMPRESSOR_TARGET_REMOVAL_ALL_BUDGETS",
                             "python_version": sys.version,
                             "sample_batch_size": getattr(getattr(attacker, "config", None),
                                                          "sample_batch_size", None),
@@ -202,6 +237,7 @@ def main() -> None:
                            checkpoint_every=args.checkpoint_every,
                            max_suffix_tokens=args.max_suffix_tokens,
                            max_steps=args.max_steps,
+                           diagnose_target=validator.target_diagnostics,
                            evidence_class="LIVE_MODEL")
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)

@@ -50,8 +50,9 @@ def select_dropout_target(
     simulate: Callable[[str], dict],
     *,
     surrogate_guardrails: Iterable[str],
+    diagnose: Callable[[str], dict] | None = None,
 ) -> dict:
-    """Greedily delete candidates until the surrogate Judge first flips NO→YES."""
+    """Select a causal deletion, preferring a clean target closest to cutoff."""
     guardrails = list(surrogate_guardrails)
     if not guardrails or any(not isinstance(value, str) or not value.strip() for value in guardrails):
         raise ValueError("Stage-I requires non-empty public surrogate_guardrails")
@@ -69,6 +70,7 @@ def select_dropout_target(
         }
 
     trials = []
+    successful = []
     for candidate in critical_candidates:
         # Each candidate is an independent counterfactual. Accumulating earlier
         # deletions would make the final token look causal when only the set was.
@@ -76,22 +78,22 @@ def select_dropout_target(
         if changed is None:
             trials.append({"candidate": str(candidate), "status": "NOT_PRESENT"})
             continue
+        diagnostics = diagnose(str(candidate)) if diagnose else None
+        if diagnostics is not None and diagnostics.get("all_rates_retained") is not True:
+            trials.append({"candidate": str(candidate), "status": "NOT_STABLE_ACROSS_BUDGETS",
+                           "deleted_occurrence": occurrence, "diagnostics": diagnostics})
+            continue
         outcome = simulate(changed)
         trial = {"candidate": str(candidate), "status": "EVALUATED",
                  "deleted_occurrence": occurrence, "target_prompt": changed,
                  "outcome": outcome}
+        if diagnostics is not None:
+            trial["diagnostics"] = diagnostics
         trials.append(trial)
         if outcome.get("label") == "YES":
-            return {
-                "status": "COMPLETE",
-                "baseline_label": "NO",
-                "counterfactual_label": "YES",
-                "selected_target": changed,
-                "critical_occurrences": [occurrence],
-                "baseline": baseline,
-                "surrogate_guardrails": guardrails,
-                "trials": trials,
-            }
+            successful.append(trial)
+            if diagnose is None:
+                break
         if outcome.get("label") not in {"NO", "YES"}:
             return {
                 "status": "JUDGE_UNKNOWN",
@@ -103,6 +105,28 @@ def select_dropout_target(
                 "surrogate_guardrails": guardrails,
                 "trials": trials,
             }
+
+    if successful:
+        selected = min(successful, key=lambda trial: (
+            trial.get("diagnostics", {}).get("cutoff_distance", float("inf")),
+            trials.index(trial),
+        ))
+        return {
+            "status": "COMPLETE",
+            "baseline_label": "NO",
+            "counterfactual_label": "YES",
+            "selected_target": selected["target_prompt"],
+            "critical_occurrences": [selected["deleted_occurrence"]],
+            "baseline": baseline,
+            "surrogate_guardrails": guardrails,
+            "trials": trials,
+            "selection": {
+                "policy": "closest_cutoff_among_clean_three_budget_no_to_yes_flips",
+                "candidate": selected["candidate"],
+                "cutoff_distance": selected.get("diagnostics", {}).get("cutoff_distance"),
+                "worst_margin": selected.get("diagnostics", {}).get("worst_margin"),
+            },
+        }
 
     return {
         "status": "NO_FEASIBLE_TARGET",
@@ -126,19 +150,18 @@ def validate_stage_one_result(stage1: object) -> None:
     evaluated = [trial["outcome"] for trial in trials or [] if isinstance(trial, dict)
                  and trial.get("status") == "EVALUATED" and
                  isinstance(trial.get("outcome"), dict)]
-    successful = [trial for trial in trials or [] if isinstance(trial, dict)
-                  and isinstance(trial.get("outcome"), dict)
-                  and trial["outcome"].get("label") == "YES"]
+    selected = [trial for trial in trials or [] if isinstance(trial, dict)
+                and trial.get("status") == "EVALUATED" and
+                trial.get("target_prompt") == stage1.get("selected_target") and
+                trial.get("deleted_occurrence") in (occurrences or [])]
     if (stage1.get("baseline_label") != "NO" or
             stage1.get("counterfactual_label") != "YES" or
             not isinstance(baseline, dict) or baseline.get("label") != "NO" or
-            not evaluated or len(successful) != 1 or
+            not evaluated or len(selected) != 1 or
             not isinstance(occurrences, list) or len(occurrences) != 1 or
-            stage1.get("selected_target") != successful[0].get("target_prompt") or
-            occurrences[0] != successful[0].get("deleted_occurrence")):
+            selected[0].get("outcome", {}).get("label") != "YES"):
         raise ValueError("Stage-I COMPLETE record lacks consistent NO-to-YES evidence")
-    if evaluated[-1].get("label") != "YES" or any(
-            evidence.get("label") != "NO" for evidence in evaluated[:-1]):
+    if any(evidence.get("label") not in {"NO", "YES"} for evidence in evaluated):
         raise ValueError("Stage-I COMPLETE record has an invalid trial sequence")
     for evidence in (baseline, *evaluated):
         if (not isinstance(evidence.get("backend"), dict) or
@@ -168,6 +191,32 @@ def validate_stage_one_surrogate_identity(stage1: object, surrogate: dict) -> No
             provenance.get("compressor_auxiliary_files") != surrogate.get("auxiliary_files")):
         raise ValueError(
             "completed Stage-I evidence was not produced by the declared Stage-II surrogate")
+    occurrence = stage1["critical_occurrences"][0]
+    selected = next(trial for trial in stage1["trials"]
+                    if trial.get("target_prompt") == stage1["selected_target"] and
+                    trial.get("deleted_occurrence") == occurrence)
+    diagnostics = selected.get("diagnostics")
+    trials = diagnostics.get("budget_trials") if isinstance(diagnostics, dict) else None
+    numeric = lambda value: isinstance(value, (int, float)) and not isinstance(value, bool)
+    target = occurrence["text"]
+    selection = stage1.get("selection")
+    if (not isinstance(selection, dict) or
+            selection.get("policy") !=
+            "closest_cutoff_among_clean_three_budget_no_to_yes_flips" or
+            selection.get("candidate") != selected.get("candidate") or
+            diagnostics.get("all_rates_retained") is not True or
+            not numeric(diagnostics.get("target_keep_score")) or
+            not numeric(diagnostics.get("cutoff_distance")) or
+            not isinstance(trials, list) or len(trials) != 3 or
+            {trial.get("compression_rate") for trial in trials} != set(RATES) or
+            not all(trial.get("target_retained") is True and
+                    all(numeric(trial.get(key)) for key in ("score", "cutoff", "margin")) and
+                    isinstance(trial.get("compressed_text"), str) and
+                    trial.get("compressor_raw") is not None and
+                    re.search(r"(?<!\w)" + re.escape(target) + r"(?!\w)",
+                              trial["compressed_text"], flags=re.IGNORECASE)
+                    for trial in trials)):
+        raise ValueError("completed Stage-I evidence lacks clean three-budget cutoff diagnostics")
 
 
 def stage_two_inputs(row: dict) -> tuple[str, str, str, str]:
@@ -236,6 +285,7 @@ def optimize_suffix_checkpoints(
     checkpoint_every: int = 25,
     max_suffix_tokens: int = 32,
     render_prompt: Callable[[str], str] | None = None,
+    calibrate: Callable[[dict], dict] | None = None,
 ) -> tuple[list[dict], int, list[dict]]:
     """Run the optimizer and retain candidates plus every step's loss."""
     if not 1 <= max_steps <= 500:
@@ -275,6 +325,8 @@ def optimize_suffix_checkpoints(
         checkpoint.update({key: value for key, value in best_metrics.items()
                            if key != "objective_loss"})
         if stable and tuple(ids) not in seen:
+            if checkpoint["scheduled_checkpoint"] and calibrate is not None:
+                checkpoint["actual_validation"] = calibrate(checkpoint)
             candidates.append(checkpoint)
             seen.add(tuple(ids))
     return candidates, max_steps, loss_history
@@ -343,12 +395,15 @@ def validate_budget_candidates(
                 candidate.get("suffix_token_count") != len(token_ids) or len(token_ids) > 32 or
                 candidate.get("suffix_roundtrip_stable") is not True):
             raise ValueError("each Stage-II candidate needs suffix and suffix_token_ids")
-        trials = []
-        for rate in rates:
-            result = validate(suffix, rate)
-            trials.append({"compression_rate": rate, **result})
-        record = {**candidate, "budget_trials": trials,
-                  "stable": all(trial.get("target_removed") is True for trial in trials)}
+        cached = candidate.get("actual_validation", {}).get("budget_trials")
+        if (isinstance(cached, list) and
+                [trial.get("compression_rate") for trial in cached] == list(rates)):
+            trials = cached
+        else:
+            trials = [{"compression_rate": rate, **validate(suffix, rate)} for rate in rates]
+        removed_count = sum(trial.get("target_removed") is True for trial in trials)
+        record = {**candidate, "budget_trials": trials, "target_removed_count": removed_count,
+                  "stable": removed_count == len(rates)}
         evaluated.append(record)
         if record["stable"]:
             winners.append(record)

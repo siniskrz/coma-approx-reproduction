@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 from pathlib import Path
 
 from comattack.spc_query_suffix import validate_blind_row
@@ -18,6 +19,11 @@ def parse_label(text: str) -> str:
     return value if value in {"YES", "NO"} else "UNKNOWN"
 
 
+def target_retained(text: str, target: str) -> bool:
+    return re.search(r"(?<!\w)" + re.escape(target) + r"(?!\w)", text,
+                     flags=re.IGNORECASE) is not None
+
+
 def run_stage1(rows: list[dict], compressor, backend, judge, *,
                evidence_class: str = "SIMULATED_OR_CUSTOM") -> list[dict]:
     if evidence_class not in {"LIVE_MODEL_AND_API", "SIMULATED_OR_CUSTOM"}:
@@ -27,8 +33,42 @@ def run_stage1(rows: list[dict], compressor, backend, judge, *,
         validate_blind_row(row)
         surrogate_text = row["surrogate_prefix"].rstrip() + "\n" + "\n".join(row["surrogate_guardrails"])
         joint = build_joint_prompt(surrogate_text, "", row["surrogate_query"])
-        compressed = compressor.compress(joint)
+        can_diagnose = all(hasattr(compressor, name) for name in
+                           ("compress_at_rate", "target_diagnostics"))
+        if evidence_class == "LIVE_MODEL_AND_API" and not can_diagnose:
+            raise ValueError("live Stage-I requires three-budget target diagnostics")
+        clean_compressions = ({rate: compressor.compress_at_rate(joint, rate)
+                               for rate in (0.5, 0.6, 0.7)} if can_diagnose else {})
+        clean_rate = getattr(compressor, "rate", None)
+        compressed = (clean_compressions[clean_rate] if clean_rate in clean_compressions
+                      else compressor.compress(joint))
         compressed_text = compressed["text"]
+
+        def diagnose(candidate: str) -> dict:
+            sentence = next((value for value in row["surrogate_guardrails"]
+                             if target_retained(value, candidate)), None)
+            if sentence is None:
+                return {"all_rates_retained": False,
+                        "reason": "candidate is absent from surrogate_guardrails",
+                        "budget_trials": []}
+            model = compressor.target_diagnostics(joint, candidate, sentence)
+            metrics = {item["compression_rate"]: item
+                       for item in model["budget_metrics"]}
+            trials = []
+            for rate, value in clean_compressions.items():
+                text = value.get("text") if isinstance(value, dict) else None
+                if not isinstance(text, str) or value.get("raw") is None:
+                    raise ValueError("Stage-I compressor returned no text/raw evidence")
+                trials.append({"compression_rate": rate,
+                               "target_retained": target_retained(text, candidate),
+                               "score": model["target_keep_score"],
+                               "cutoff": metrics[rate]["cutoff"],
+                               "margin": metrics[rate]["margin"],
+                               "compressed_text": text,
+                               "compressor_raw": value["raw"]})
+            return {**model, "all_rates_retained": all(
+                trial["target_retained"] for trial in trials),
+                "budget_trials": trials}
 
         def simulate(prompt: str) -> dict:
             backend_call = _call(backend, [
@@ -58,6 +98,7 @@ def run_stage1(rows: list[dict], compressor, backend, judge, *,
             row["critical_candidates"],
             simulate,
             surrogate_guardrails=row["surrogate_guardrails"],
+            diagnose=diagnose if can_diagnose else None,
         )
         stage1["raw_provenance"] = {
             "evidence_class": evidence_class,

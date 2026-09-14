@@ -120,7 +120,9 @@ class PipelineIntegrationTest(unittest.TestCase):
         self.assertEqual(attacks, [{"id": "toy-1", "skip": True,
                                     "reason": "Stage-I did not produce a validated behavior flip"}])
         result = run_spc_asr(private, attacks, Compressor(), NeverCall(), NeverCall())
-        self.assertEqual(result["records"][0]["status"], "SKIPPED_ATTACK")
+        self.assertEqual(result["records"][0]["status"], "PRECONDITION_FAILED")
+        self.assertEqual(result["records"][0]["precondition_code"], "SKIPPED_ATTACK")
+        self.assertIsNone(result["baseline_gated_asr"]["value"])
         self.assertEqual(result["n_complete_paired"], 0)
 
 

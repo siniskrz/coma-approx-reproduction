@@ -8,6 +8,21 @@ class Compressor:
         return {"text": text, "raw": {"text": text}}
 
 
+class DiagnosticCompressor(Compressor):
+    rate = 0.6
+
+    def compress_at_rate(self, text, rate):
+        return {"text": text, "raw": {"rate": rate}}
+
+    def target_diagnostics(self, text, target, target_sentence):
+        del text, target, target_sentence
+        return {"target_keep_score": 0.51, "worst_margin": 0.02,
+                "cutoff_distance": 0.02,
+                "budget_metrics": [
+                    {"compression_rate": rate, "cutoff": 0.5, "margin": 0.01}
+                    for rate in (0.5, 0.6, 0.7)]}
+
+
 class Backend:
     def complete(self, messages, *, max_tokens):
         prompt = messages[-1]["content"]
@@ -26,7 +41,8 @@ class Judge:
 class Stage1RunnerTest(unittest.TestCase):
     def test_blind_runner_observes_real_flip_without_trusted_fields(self):
         row = {"sample_id": "toy", "public_surrogate_id": "public-1",
-               "source_hash": "ab" * 32, "original_query": "May it enter?",
+               "source_hash": "ab" * 32, "lineage_sha256": "cd" * 32,
+               "original_query": "May it enter?",
                "surrogate_query": "May the public token enter?",
                "surrogate_prefix": "A public toy keeper follows this rule.",
                "surrogate_guardrails": ["must not approve entry"],
@@ -45,7 +61,8 @@ class Stage1RunnerTest(unittest.TestCase):
 
     def test_guardrail_not_just_prefix_is_in_stage_one_prompt(self):
         row = {"sample_id": "toy", "public_surrogate_id": "public-1",
-               "source_hash": "ab" * 32, "original_query": "May it enter?",
+               "source_hash": "ab" * 32, "lineage_sha256": "cd" * 32,
+               "original_query": "May it enter?",
                "surrogate_query": "May the public token enter?",
                "surrogate_prefix": "Public toy keeper rules:",
                "surrogate_guardrails": ["must not approve entry"],
@@ -53,6 +70,21 @@ class Stage1RunnerTest(unittest.TestCase):
         result = run_stage1([row], Compressor(), Backend(), Judge())[0]
         self.assertEqual(result["stage1"]["status"], "COMPLETE")
         self.assertIn("must not approve entry", result["stage1"]["clean_joint_prompt"])
+
+    def test_records_clean_three_budget_score_cutoff_margin_and_text(self):
+        row = {"sample_id": "toy", "public_surrogate_id": "public-1",
+               "source_hash": "ab" * 32, "lineage_sha256": "cd" * 32,
+               "original_query": "May it enter?",
+               "surrogate_query": "May the public token enter?",
+               "surrogate_prefix": "Public toy keeper rules:",
+               "surrogate_guardrails": ["must not approve entry"],
+               "critical_candidates": ["not"]}
+        stage1 = run_stage1([row], DiagnosticCompressor(), Backend(), Judge())[0]["stage1"]
+        trials = stage1["trials"][0]["diagnostics"]["budget_trials"]
+        self.assertEqual([trial["compression_rate"] for trial in trials], [0.5, 0.6, 0.7])
+        self.assertTrue(all(trial["target_retained"] for trial in trials))
+        self.assertTrue(all({"score", "cutoff", "margin", "compressed_text"} <= set(trial)
+                            for trial in trials))
 
 
 if __name__ == "__main__":
