@@ -661,7 +661,8 @@ def main() -> None:
     parser.add_argument("--compressor", choices=sorted(COMPRESSOR_REGISTRY), default="llmlingua2")
     parser.add_argument("--compressor-snapshot", required=True)
     parser.add_argument("--compressor-revision", required=True)
-    parser.add_argument("--compressor-weight-sha256")
+    parser.add_argument("--compressor-weight-sha256", required=True,
+                        help="SHA-256 of the frozen compressor weight files")
     parser.add_argument("--compression-rate", type=float, default=0.6)
     parser.add_argument("--max-suffix-tokens", type=int, default=32)
     parser.add_argument("--max-input-tokens", type=int, default=512)

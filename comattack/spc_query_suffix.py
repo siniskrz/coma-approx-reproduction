@@ -1,4 +1,4 @@
-"""Safe query-suffix artifacts for the public toy SPC dataset.
+"""Safe query-suffix artifacts for the public SPC surrogate path.
 
 This module deliberately contains no attack optimisation.  It establishes the
 paper threat-model boundary first: trusted fields are hashed for provenance but
